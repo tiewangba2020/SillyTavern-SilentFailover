@@ -31,7 +31,7 @@ export function normalizeRequest(input) {
     input.custom_exclude_body?.trim() ||
     input.custom_include_headers?.trim()
   )
-    throw new Error("请清空此专用连接的自定义请求体和请求头");
+    throw new Error("故障转移暂不支持酒馆自定义请求体和请求头，请在原生连接设置中检查这些参数");
   const out = { messages: structuredClone(input.messages) };
   for (const name of [
     "temperature",

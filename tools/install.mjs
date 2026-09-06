@@ -34,7 +34,36 @@ if (pkg.name !== "sillytavern" || !fs.existsSync(path.join(root, "server.js")))
 const parts = String(pkg.version).split(".").map(Number);
 if (parts[0] < 1 || (parts[0] === 1 && parts[1] < 18))
   throw new Error("SillyTavern 1.18.0 or newer is required");
-const configPath = path.join(root, "config.yaml");
+const configArg = process.argv.includes("--config")
+  ? process.argv[process.argv.indexOf("--config") + 1]
+  : null;
+if (
+  process.argv.includes("--config") &&
+  (!configArg || configArg.startsWith("--"))
+)
+  throw new Error(
+    "--config requires the config.yaml path used to start SillyTavern",
+  );
+const rootConfig = path.join(root, "config.yaml");
+const dockerConfig = path.join(root, "config", "config.yaml");
+if (
+  !configArg &&
+  fs.existsSync(rootConfig) &&
+  fs.existsSync(dockerConfig) &&
+  fs.realpathSync(rootConfig) !== fs.realpathSync(dockerConfig)
+)
+  throw new Error(
+    "Multiple config files found. Use --config to select the active config.yaml",
+  );
+const selectedConfig = configArg
+  ? path.resolve(root, configArg)
+  : fs.existsSync(dockerConfig)
+    ? dockerConfig
+    : rootConfig;
+const configPath = fs.existsSync(selectedConfig)
+  ? fs.realpathSync(selectedConfig)
+  : selectedConfig;
+fs.accessSync(path.dirname(configPath), fs.constants.W_OK);
 const source = fs.existsSync(configPath)
   ? configPath
   : path.join(root, "default/config.yaml");
@@ -69,5 +98,9 @@ doc.set("enableServerPlugins", true);
 fs.writeFileSync(configPath + ".silent-failover.tmp", doc.toString());
 fs.renameSync(configPath + ".silent-failover.tmp", configPath);
 console.log(
-  JSON.stringify({ installed: root, backup, restartRequired: true }, null, 2),
+  JSON.stringify(
+    { installed: root, configPath, backup, restartRequired: true },
+    null,
+    2,
+  ),
 );

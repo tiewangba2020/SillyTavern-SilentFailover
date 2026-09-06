@@ -24,16 +24,5 @@ export function adaptParameters(node, input) {
       Math.max(0, Math.min(1, payload.temperature)),
       "Claude 温度范围为 0 到 1",
     );
-  if (Number.isInteger(node.maxTokens) && node.maxTokens > 0) {
-    const fields = ["max_tokens", "max_completion_tokens"].filter(
-      (k) => payload[k] != null,
-    );
-    if (!fields.length) fields.push("max_tokens");
-    for (const key of fields) {
-      const value = payload[key];
-      if (value == null || value > node.maxTokens)
-        change(key, node.maxTokens, "节点输出上限");
-    }
-  }
   return { payload, adjustments };
 }

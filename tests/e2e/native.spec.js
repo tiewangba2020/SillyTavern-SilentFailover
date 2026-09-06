@@ -196,7 +196,7 @@ test("native stream interruptions are discarded; all failures restore chat silen
   ).toEqual(before);
   await expect(page.locator("#toast-container .toast-error")).toHaveCount(0);
 });
-test("native model and active key update on next request, and disabled linkage passes through", async ({
+test("native model and active key update on next request, and disabled plugin passes through", async ({
   page,
 }) => {
   await setup(page);
@@ -218,7 +218,7 @@ test("native model and active key update on next request, and disabled linkage p
   expect(calls[1].body.model).toBe("new-native-model");
   expect(calls[1].bearer).toBe("Bearer changed-native-key");
   const c = await api(page, "/config");
-  await api(page, "/config", { ...c, nativeFirst: false });
+  await api(page, "/config", { ...c, enabled: false });
   let passthrough = false;
   await page.route("**/api/backends/chat-completions/generate", (route) => {
     passthrough = true;
@@ -347,13 +347,12 @@ test("linkage UI preserves native connection across mode changes and reload", as
   const root = page.locator("#silent-failover-settings");
   await root.locator(".inline-drawer-toggle").click();
   await expect(root.locator(".sf-native")).toContainText("native-test");
-  await root
-    .getByRole("button", { name: "仅使用备用节点", exact: true })
-    .click();
+  await root.getByLabel("启用 酒馆原生 API", { exact: true }).uncheck();
+  await root.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect(
-    root.getByLabel("原生连接优先", { exact: true }),
+    root.getByLabel("启用 酒馆原生 API", { exact: true }),
   ).not.toBeChecked();
-  await root.getByLabel("原生连接优先", { exact: true }).check();
+  await root.getByLabel("启用 酒馆原生 API", { exact: true }).check();
   await root.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect(root.locator("[data-status]")).toHaveText("设置已保存");
   expect(
@@ -361,6 +360,10 @@ test("linkage UI preserves native connection across mode changes and reload", as
       () => SillyTavern.getContext().chatCompletionSettings.custom_url,
     ),
   ).toBe("http://127.0.0.1:9108/v1");
+  await Promise.all([
+    page.waitForResponse((r) => r.url().endsWith("/api/settings/save")),
+    page.evaluate(() => SillyTavern.getContext().saveSettingsDebounced()),
+  ]);
   await page.reload();
   await expect(root.locator(".sf-native")).toContainText("native-test");
   await page.locator("#extensions-settings-button .drawer-toggle").click();

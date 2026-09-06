@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.3.2.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.4.0.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -74,6 +74,66 @@ https://github.com/tiewangba2020/SillyTavern-SilentFailover
 
 **这一步只安装前端。** 接着下载完整安装包，按方法二的第 3、4、5 步安装服务端并重启酒馆。已经通过 URL 安装前端时，无需再次复制前端文件夹。以上方式选择一种，避免重复安装同一扩展。
 
+### Android 手机：Termux
+
+Termux 是 Android 上的终端环境，操作类似 Linux，但依赖用 `pkg` 安装。先在运行酒馆的终端按 `Ctrl+C` 停止酒馆；使用自动重启或一键启动脚本的，也要先停掉它。
+
+先检查依赖；已经有符合要求的 Node.js 时不必重装：
+
+```bash
+node --version
+pkg install curl unzip
+# 只有缺少 Node.js 或版本低于 20.3 时执行：
+pkg install nodejs-lts
+```
+
+确认酒馆在 `$HOME/SillyTavern`（目录中应有 `server.js` 和 `package.json`）；其他位置请修改 `--target` 后面的路径。执行：
+
+```bash
+curl -fL https://raw.githubusercontent.com/tiewangba2020/SillyTavern-SilentFailover/main/tools/install.sh -o "$HOME/api-still-up-install.sh" && bash "$HOME/api-still-up-install.sh" --target "$HOME/SillyTavern"
+```
+
+脚本会下载最新正式版，校验安装包，备份并安装两部分。不需要 root，不会替你更换酒馆启动器。安装成功后按原来的方式启动酒馆，再刷新浏览器。看见错误时先处理错误，不要忽略后继续启动；网络下载或校验失败时不会安装。
+
+### 云服务器：直接运行 Node.js 的 Linux 部署
+
+通过 SSH 或服务器面板终端登录到实际运行酒馆的环境，用运行酒馆的账号执行。先用原部署方式停止酒馆；面板、PM2、systemd 和启动脚本的停止方式不同，不要直接停止服务器上的所有 Node 进程。
+
+确认 `node --version` 不低于 20.3，并安装 `bash`、`curl`、`unzip`。例如 Debian/Ubuntu 可由有权限的账号执行 `sudo apt-get install bash curl unzip`；其他发行版使用各自的包管理器。
+
+```bash
+curl -fL https://raw.githubusercontent.com/tiewangba2020/SillyTavern-SilentFailover/main/tools/install.sh -o /tmp/api-still-up-install.sh && bash /tmp/api-still-up-install.sh --target "/实际路径/SillyTavern"
+```
+
+如果启动酒馆时使用了 `--configPath` 指定配置文件，给安装脚本补上同一个文件路径，例如 `--config "/实际路径/config.yaml"`。安装成功后，用原来的面板或服务管理器重新启动酒馆，再刷新网页。脚本不会修改防火墙、反向代理、Swap 或 Node 内存参数。
+
+### 云服务器：Docker / Docker Compose 部署
+
+Docker 中的酒馆运行在容器里。**不要把安装目标指向宿主机上只有 compose.yaml 的文件夹**，也不要只写入容器的临时文件层。先在面板或 Compose 中确认以下四个目录已持久化挂载。官方 Compose 示例的容器路径是：
+
+```yaml
+volumes:
+  - ./config:/home/node/app/config
+  - ./data:/home/node/app/data
+  - ./plugins:/home/node/app/plugins
+  - ./extensions:/home/node/app/public/scripts/extensions/third-party
+```
+
+已有挂载不要直接替换；以你实际的配置、数据和目录为准。下面以官方服务名 `sillytavern` 为例，在包含 Compose 配置的目录执行。宿主机需有 `curl` 和 `unzip`，使用容器内现成的 Node.js 安装：
+
+```bash
+docker compose stop sillytavern
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.0/SillyTavern-SilentFailover-v1.4.0.zip -o SillyTavern-SilentFailover-v1.4.0.zip
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.0/SHA256SUMS-1.4.0 -o SHA256SUMS-1.4.0
+sha256sum --check --ignore-missing SHA256SUMS-1.4.0 && unzip SillyTavern-SilentFailover-v1.4.0.zip -d api-still-up-package
+docker compose run --rm --no-deps --entrypoint node -v "$PWD/api-still-up-package:/tmp/api-still-up-package:ro" sillytavern /tmp/api-still-up-package/install.mjs --target /home/node/app --config /home/node/app/config/config.yaml
+docker compose up -d sillytavern
+```
+
+面板管理的容器可能使用不同服务名、路径、用户权限或命名卷，需要按实际部署调整。只有网页访问权的用户不能安装服务端，应由部署者操作。容器重建后若插件消失，应检查 `plugins` 和前端扩展目录是否挂载；不是反复重新装前端就能解决。
+
+安装器已测试根目录配置、Docker 风格的嵌套配置、覆盖升级和文件保留；Bash 下载脚本已在 Windows Git Bash 下测试安装与校验失败路径。目前没有 Android 真机或 Docker/Linux 运行环境实测，以上平台步骤不能视为所有第三方启动器的兼容保证。
+
 ## 第一次使用
 
 ### 1. 添加备用节点
@@ -93,7 +153,10 @@ https://github.com/tiewangba2020/SillyTavern-SilentFailover
 | 模型 ID | 填写供应商支持的完整模型 ID，不要填写模型的展示昵称 |
 | 优先级 | 数字越小越先尝试，也可保存后用上下箭头调整顺序 |
 | 流式请求 | 控制插件向上游请求时是否使用流式；聊天中仍会等待完整回复后显示 |
-| 节点输出上限 | 可留空跟随酒馆；填写后限制该节点的输出 token 数，不修改酒馆全局设置 |
+
+每个节点和酒馆原生 API 行都会显示“流式请求”或“非流式请求”，悬浮窗也显示实际尝试的流式状态。输出长度跟随酒馆的回复长度设置；旧版本填写过的节点输出上限不再生效。
+
+顶部“自动补全 API 地址”默认开启。OpenAI 兼容和 Claude 原生接口缺少版本路径时补 `/v1`；已有 `/v1`、`/v2`、完整 `/chat/completions` 或 `/messages` 地址不会重复追加。Gemini 保持原生 `/v1beta` 规则。供应商使用特殊的无版本路径时可关闭补全。保存和测试使用相同规则；已经保存过的补全地址不会因关闭开关而自动删掉 `/v1`，可重新编辑地址。酒馆原连接只对发送时的地址做处理，不改写酒馆设置。
 
 常见地址格式：
 
@@ -110,14 +173,16 @@ https://github.com/tiewangba2020/SillyTavern-SilentFailover
 **继续使用酒馆原有 API，备用节点负责接手：**
 
 1. 在酒馆顶部插头图标的“API 连接”面板中，配置平时使用的接口和模型。
-2. 在插件中开启“启用故障转移”和“原生连接优先”。
-3. 插件会显示“首选 · 酒馆原生连接”。每次先尝试原连接，失败后按顺序尝试备用节点，不需要在插件里重复填写原连接的 Key。
+2. 在插件中开启“启用故障转移”，保存设置。列表第一行“酒馆原生 API”默认勾选；旧版本已明确关闭原生优先的配置会保留关闭状态，可在此重新勾选。
+3. 每次先尝试原连接，失败后按顺序尝试备用节点，不需要在插件里重复填写原连接的 Key。
 
 原生连接联动支持 Custom、OpenAI、Claude 和 Google AI Studio。切换酒馆原有模型或密钥后，下一次生成会使用新配置。
 
 **只使用插件里添加的节点：**
 
-点击“仅使用备用节点”。插件会切换到专用连接，聊天时按节点优先级请求。想回到之前的酒馆连接时，点击“恢复原连接”；需要继续故障转移时，再开启“原生连接优先”。
+取消列表第一行“酒馆原生 API”的勾选并保存。插件直接接管聊天请求，按备用节点优先级执行，不再切换酒馆的 API 来源，也不写入专用地址或占位模型。重新勾选原生 API 可恢复原连接优先；停用故障转移后恢复酒馆自身请求流程。酒馆需要处于受支持的聊天补全来源：Custom、OpenAI、Claude 或 Google AI Studio。
+
+升级时如果仍在使用旧版插件专用连接，会自动恢复此前备份的原连接；没有备份时清除旧占位地址和模型，再由你配置原连接。已启用备用节点时，即使原生连接未就绪也能尝试备用节点；就绪状态不等于已验证所有节点可用。
 
 ### 3. 测试并开始聊天
 
@@ -153,6 +218,15 @@ https://github.com/tiewangba2020/SillyTavern-SilentFailover
 1.3.0 默认使用“耐心等待”，升级旧配置也默认采用此模式：插件不设置强制总时限、响应头或数据等待时限，HTTP 客户端的默认响应超时也关闭。正在排队、处理大量上下文或推理的请求可以继续等待；明确 API 错误、连接中断及用户停止仍会结束当前尝试。浏览器与酒馆失去联系时仍保留任务租约清理，供应商和代理自己的限制无法由插件关闭。
 
 只有选择“限时切换”才显示超时设置，允许分别设置总时限、响应头、首数据和数据间隔，范围 0–86400 秒，`0` 为关闭该项限制。“耐心等待”隐藏并忽略这些时限，原数值保留供以后切回使用。收到数据会刷新数据间隔计时，正文和推理都算进展；流式心跳只能证明连接仍有活动，不能证明模型正在生成。限时模式可能中断仍在处理的请求，大上下文用户建议使用耐心等待。保存新的等待策略在下一次节点请求生效，不修改当前正在接收的请求。
+
+| 界面设置 | 从什么时候开始等 | 到时间后怎样处理 |
+| --- | --- | --- |
+| 完整回复最多等多久 | 请求发出时 | 还没拿到完整回复就换 API，即使过程中一直有内容传回 |
+| 完全没回应时等多久 | 请求发出时 | 对方连最初的响应都没发回来就换 API |
+| 开始回应后，首批数据等多久 | 对方开始响应时 | 还没传回任何数据就换 API；最初的响应不代表已经有回复文字 |
+| 接收数据中，停顿多久就换 | 每次收到数据时重新计时 | 连续这么久没有新数据才换 API |
+
+以上单位都是秒，填 `0` 表示不限。非流式接口通常要生成完才一次性返回，可能长时间没有数据；大量上下文、长推理或非流式请求建议使用“耐心等待”，通过悬浮窗自行切换或停止。
 
 无法仅凭长时间没有数据，准确判断 API 在生成还是卡住。耐心模式下可用悬浮窗手动切换或停止，不使用历史平均耗时自动中断请求。
 
@@ -192,7 +266,7 @@ https://github.com/tiewangba2020/SillyTavern-SilentFailover
 
 ### 酒馆原来的 API 设置去哪了？
 
-仍在顶部插头图标的“API 连接”面板。使用“仅使用备用节点”后，那里会显示插件专用连接；点击“恢复原连接”可以还原之前保存的连接配置。专用地址 `http://sillytavern-failover.invalid/v1` 是插件的识别标记，不是真实上游 API 地址。
+仍在顶部插头图标的“API 连接”面板。1.4.0 起插件不再改写那里的 API 来源、地址和模型；是否先用原连接，由插件列表第一行“酒馆原生 API”的勾选项控制。原接口未连接时，插件可能显示“API还没挂就绪”，表示可以提交给插件尝试，不代表已验证上游接口可用。
 
 ### 官网会员订阅能直接用吗？
 

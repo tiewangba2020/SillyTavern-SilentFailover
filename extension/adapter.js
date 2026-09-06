@@ -54,10 +54,7 @@ export function installAdapter(
     if (
       disposed ||
       url.origin !== location.origin ||
-      ![
-        "/api/backends/chat-completions/generate",
-        "/api/backends/chat-completions/status",
-      ].includes(url.pathname)
+      url.pathname !== "/api/backends/chat-completions/generate"
     )
       return previous(input, init);
     let body;
@@ -77,33 +74,11 @@ export function installAdapter(
       )
     )
       return previous(input, init);
-    const dedicated =
-      body.chat_completion_source === "custom" && body.custom_url === ENDPOINT;
-    let nativeFirst = false;
-    if (!dedicated) {
-      const settings = await api("/config").catch(() => null);
-      nativeFirst =
-        settings?.enabled === true && settings?.nativeFirst === true;
-      if (!nativeFirst) return previous(input, init);
-    }
-    if (url.pathname.endsWith("/status"))
-      return json({
-        data: [
-          {
-            id: nativeFirst
-              ? context().chatCompletionSettings[
-                  {
-                    custom: "custom_model",
-                    openai: "openai_model",
-                    claude: "claude_model",
-                    makersuite: "google_model",
-                  }[body.chat_completion_source]
-                ] || "native-default"
-              : "failover-default",
-            object: "model",
-          },
-        ],
-      });
+    const settings = await api("/config").catch(
+      () => lifecycle.config?.() || null,
+    );
+    if (!settings?.enabled) return previous(input, init);
+    const nativeFirst = settings.nativeFirst !== false;
     const id = crypto.randomUUID();
     const saved = lifecycle.start?.();
     const preferredNodeId = lifecycle.takePreferredNode?.(saved?.type);

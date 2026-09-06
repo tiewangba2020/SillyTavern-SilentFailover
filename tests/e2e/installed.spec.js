@@ -26,7 +26,7 @@ async function open(page) {
   const root = page.locator("#silent-failover-settings");
   await root.locator(".inline-drawer-toggle").click();
   await expect(
-    root.getByRole("button", { name: "仅使用备用节点", exact: true }),
+    root.getByRole("button", { name: "保存设置", exact: true }),
   ).toBeVisible();
   return root;
 }
@@ -40,6 +40,7 @@ async function setup(page, mode = "fallback", loop = false) {
   await api(page, "/config", {
     ...current,
     enabled: true,
+    nativeFirst: false,
     maxRounds: 0,
     notificationMode: "silent",
     floatingWindow: false,
@@ -57,14 +58,17 @@ async function setup(page, mode = "fallback", loop = false) {
   });
   await api(page, "/records/clear", {});
   await root.getByRole("button", { name: "刷新配置", exact: true }).click();
-  await root
-    .getByRole("button", { name: "仅使用备用节点", exact: true })
-    .click();
-  await expect(root.locator("[data-status]")).toHaveText("已使用故障转移连接");
   await page.locator("#extensions-settings-button .drawer-toggle").click();
   await page.evaluate(async () => {
     const c = SillyTavern.getContext();
+    await c.executeSlashCommandsWithOptions("/api quiet=true custom");
     Object.assign(c.chatCompletionSettings, {
+      custom_url: "http://127.0.0.1:9107/original/v1",
+      custom_model: "original-model",
+      custom_include_body: "",
+      custom_exclude_body: "",
+      custom_include_headers: "",
+      stream_openai: false,
       temp_openai: 1,
       openai_max_tokens: 1024,
       openai_max_context: 32768,
@@ -191,14 +195,13 @@ test("real-world global sampling survives a quota failure and Claude fallback", 
   expect(record.attempts[0].category).toBe("quota");
   expect(record.attempts[1].adjustments.map((a) => a.parameter)).toEqual([
     "temperature",
-    "max_tokens",
   ]);
   const calls = await (
     await page.request.get("http://127.0.0.1:9107/calls")
   ).json();
   expect(calls.calls[1].body).toMatchObject({
     temperature: 1,
-    max_tokens: 4096,
+    max_tokens: 30000,
   });
   expect(
     await page.evaluate(
@@ -334,7 +337,7 @@ test("desktop and mobile settings are usable without overflow", async ({
   );
   await expect(root.getByLabel("API 地址", { exact: true })).toBeVisible();
   const box = await root
-    .getByRole("button", { name: "仅使用备用节点", exact: true })
+    .getByRole("button", { name: "保存设置", exact: true })
     .boundingBox();
   expect(box.width).toBeGreaterThan(100);
   expect(box.height).toBeLessThan(55);
@@ -389,11 +392,14 @@ test("turning off loop while waiting stops without another round", async ({
   expect(r.attemptCount).toBe(3);
   await expect(page.locator("#toast-container .toast-error")).toHaveCount(0);
 });
-test("refresh preserves installed configuration and dedicated connection still works", async ({
+test("refresh preserves original connection and backup routing still works", async ({
   page,
 }) => {
   await setup(page, "fallback");
-  await page.waitForTimeout(1200);
+  await Promise.all([
+    page.waitForResponse((r) => r.url().endsWith("/api/settings/save")),
+    page.evaluate(() => SillyTavern.getContext().saveSettingsDebounced()),
+  ]);
   await page.reload();
   await expect(page.locator("#silent-failover-settings")).toBeAttached();
   await page.evaluate(async () => {
@@ -403,14 +409,17 @@ test("refresh preserves installed configuration and dedicated connection still w
     await page.evaluate(
       () => SillyTavern.getContext().chatCompletionSettings.custom_url,
     ),
-  ).toBe("http://sillytavern-failover.invalid/v1");
+  ).toBe("http://127.0.0.1:9107/original/v1");
   expect(await generate(page)).toBe("success");
+  expect((await api(page, "/records"))[0].state).toBe("succeeded");
   await expect(page.locator("#toast-container .toast-error")).toHaveCount(0);
 });
 test("ordinary API requests pass through the adapter unchanged", async ({
   page,
 }) => {
   await open(page);
+  const c = await api(page, "/config");
+  await api(page, "/config", { ...c, enabled: false });
   let seen = false;
   await page.route("**/api/backends/chat-completions/generate", (route) => {
     seen = true;
@@ -576,7 +585,7 @@ test("patient mode hides timeouts and limited mode retains saved values", async 
   await expect(timeouts).toBeVisible();
   await timeouts.locator("summary").click();
   await expect(
-    root.getByLabel("响应头超时（秒，0 关闭）", { exact: true }),
+    root.getByLabel("完全没回应时等多久（秒，0 不限）", { exact: true }),
   ).toHaveValue("999");
   await root.getByLabel("等待策略", { exact: true }).selectOption("patient");
   await expect(timeouts).toBeHidden();

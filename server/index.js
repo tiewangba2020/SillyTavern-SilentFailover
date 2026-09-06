@@ -103,13 +103,28 @@ export async function init(router, options = {}) {
         );
         delete input.custom_prompt_post_processing;
       }
+      let originalNode = null;
+      if (native) {
+        try {
+          originalNode = nativeNode(input, req.user.directories, host);
+        } catch {
+          originalNode = {
+            id: "__native_connection__",
+            name: "酒馆原生连接",
+            model: "未就绪",
+            stream: input?.stream === true,
+            protocol: "openai",
+            priority: -1,
+            unavailableReason:
+              "酒馆原生 API 配置未就绪，请检查地址、模型和密钥设置",
+          };
+        }
+      }
       res.json(
         req.failover.jobs.create(req.body.id, input, {
           generation: req.body.generation,
           preferredNodeId: req.body.preferredNodeId,
-          nativeNode: native
-            ? nativeNode(input, req.user.directories, host)
-            : null,
+          nativeNode: originalNode,
         }),
       );
     }),
@@ -148,7 +163,11 @@ export async function init(router, options = {}) {
     const abort = () => controller.abort();
     res.on("close", abort);
     try {
-      const node = req.failover.store.previewNode(req.body?.node, false);
+      const node = req.failover.store.previewNode(
+        req.body?.node,
+        false,
+        req.body?.settings,
+      );
       res.json(
         await listModels(
           node,
@@ -236,7 +255,7 @@ export async function init(router, options = {}) {
           .status(409)
           .json({ error: "插件更新中或等待重启，请重启酒馆后测试" });
       const node = req.body.node
-        ? req.failover.store.previewNode(req.body.node)
+        ? req.failover.store.previewNode(req.body.node, true, req.body.settings)
         : req.failover.store.config.nodes.find((n) => n.id === req.body.nodeId);
       if (!node) throw new Error("节点不存在");
       res.json(
@@ -255,6 +274,7 @@ export async function init(router, options = {}) {
               ...Object.fromEntries(
                 [
                   "waitMode",
+                  "autoCompleteUrl",
                   "timeoutSeconds",
                   "headerSeconds",
                   "firstTokenSeconds",

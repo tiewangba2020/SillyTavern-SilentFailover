@@ -5,10 +5,11 @@ export async function listModels(node, signal) {
   let base = node.url.replace(/\/(chat\/completions|messages)\/?$/, "");
   if (protocol === "gemini") {
     const url = new URL(base);
-    url.pathname = url.pathname
+    let pathname = url.pathname
       .replace(/\/models\/.*$/, "")
       .replace(/\/+$/, "");
-    if (!/\/v1(beta)?$/.test(url.pathname)) url.pathname += "/v1beta";
+    if (!/\/v1(beta)?$/.test(pathname)) pathname += "/v1beta";
+    url.pathname = pathname;
     base = url.href.replace(/\/+$/, "");
   }
   const headers =

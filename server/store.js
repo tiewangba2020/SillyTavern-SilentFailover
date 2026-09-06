@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { completeApiUrl } from "./url.js";
 export const DEFAULTS = Object.freeze({
   enabled: false,
-  nativeFirst: false,
+  nativeFirst: true,
+  autoCompleteUrl: true,
   loop: false,
   maxRounds: 0,
   notificationMode: "silent",
@@ -47,7 +49,7 @@ export class Store {
   publicConfig() {
     return {
       ...this.config,
-      nodes: this.config.nodes.map(({ key, ...n }) => ({
+      nodes: this.config.nodes.map(({ key, maxTokens, ...n }) => ({
         ...n,
         keySet: Boolean(key),
         keyHint: key ? "********" + (key.length >= 8 ? key.slice(-3) : "") : "",
@@ -57,10 +59,11 @@ export class Store {
   keys() {
     return this.config.nodes.map((n) => n.key).filter(Boolean);
   }
-  previewNode(input, requireModel = true) {
+  previewNode(input, requireModel = true, settings = {}) {
     if (!input || typeof input !== "object") throw new Error("节点无效");
     return this.validate({
       ...this.publicConfig(),
+      autoCompleteUrl: settings.autoCompleteUrl ?? this.config.autoCompleteUrl,
       nodes: [
         {
           ...input,
@@ -109,28 +112,26 @@ export class Store {
           ? n.key
           : old.get(id)?.key || "";
       if (key.length > 8192) throw new Error("API Key 过长");
-      const maxTokens =
-        n.maxTokens == null || n.maxTokens === ""
-          ? null
-          : number(n.maxTokens, 1, 2000000, "节点输出上限");
-      if (maxTokens != null && !Number.isInteger(maxTokens))
-        throw new Error("节点输出上限必须为整数");
       return {
         id,
         name,
         model,
         protocol,
-        url: url.href.replace(/\/+$/, ""),
+        url: completeApiUrl(
+          url.href,
+          protocol,
+          input.autoCompleteUrl !== false,
+        ),
         key,
         enabled: n.enabled !== false,
         priority: number(n.priority ?? index + 1, 0, 99999, "优先级"),
         stream: n.stream !== false,
-        maxTokens,
       };
     });
     const config = {
       enabled: input.enabled === true,
-      nativeFirst: input.nativeFirst === true,
+      nativeFirst: input.nativeFirst !== false,
+      autoCompleteUrl: input.autoCompleteUrl !== false,
       loop: input.loop === true,
       maxRounds: number(input.maxRounds ?? 0, 0, 10000, "总轮次上限"),
       notificationMode: input.notificationMode ?? "silent",

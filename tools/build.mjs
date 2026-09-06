@@ -58,6 +58,7 @@ await build({
 if (fs.existsSync("README.md"))
   fs.copyFileSync("README.md", "release/README.md");
 fs.copyFileSync("docs/PUBLIC-VERIFICATION.md", "release/VERIFICATION.md");
+fs.copyFileSync("tools/install.sh", "release/install.sh");
 // Remove private reports left by older local builds.
 for (const name of [
   "NATIVE-LINK-VERIFICATION.md",

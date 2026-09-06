@@ -37,10 +37,10 @@ test("actual Claude gateway models accept a global temperature of 1.3 without mu
     1.3,
   );
 });
-test("per-node output caps affect only larger limits and leave global settings untouched", () => {
+test("obsolete per-node output caps are ignored; output limits follow SillyTavern", () => {
   const input = { max_tokens: 30000, max_completion_tokens: 50000 };
   const { payload } = adaptParameters({ maxTokens: 4096 }, input);
-  expect(payload).toEqual({ max_tokens: 4096, max_completion_tokens: 4096 });
+  expect(payload).toEqual(input);
   expect(input.max_tokens).toBe(30000);
   expect(
     adaptParameters({ maxTokens: 4096 }, { max_tokens: 8 }).payload.max_tokens,

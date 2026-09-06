@@ -44,10 +44,7 @@ function installAdapter(context, onLocalRecord = () => {
       input instanceof Request ? input.url : String(input),
       location.href
     );
-    if (disposed || url.origin !== location.origin || ![
-      "/api/backends/chat-completions/generate",
-      "/api/backends/chat-completions/status"
-    ].includes(url.pathname))
+    if (disposed || url.origin !== location.origin || url.pathname !== "/api/backends/chat-completions/generate")
       return previous(input, init);
     let body;
     try {
@@ -59,27 +56,11 @@ function installAdapter(context, onLocalRecord = () => {
       body?.chat_completion_source
     ))
       return previous(input, init);
-    const dedicated = body.chat_completion_source === "custom" && body.custom_url === ENDPOINT;
-    let nativeFirst = false;
-    if (!dedicated) {
-      const settings = await api("/config").catch(() => null);
-      nativeFirst = settings?.enabled === true && settings?.nativeFirst === true;
-      if (!nativeFirst) return previous(input, init);
-    }
-    if (url.pathname.endsWith("/status"))
-      return json({
-        data: [
-          {
-            id: nativeFirst ? context().chatCompletionSettings[{
-              custom: "custom_model",
-              openai: "openai_model",
-              claude: "claude_model",
-              makersuite: "google_model"
-            }[body.chat_completion_source]] || "native-default" : "failover-default",
-            object: "model"
-          }
-        ]
-      });
+    const settings = await api("/config").catch(
+      () => lifecycle.config?.() || null
+    );
+    if (!settings?.enabled) return previous(input, init);
+    const nativeFirst = settings.nativeFirst !== false;
     const id = crypto.randomUUID();
     const saved = lifecycle.start?.();
     const preferredNodeId = lifecycle.takePreferredNode?.(saved?.type);
@@ -267,7 +248,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.3.2";
+var VERSION = "1.4.0";
 
 // extension/panel.js
 var make = (tag, cls, text) => {
@@ -456,21 +437,27 @@ function createTaskPanel(api, openRecords) {
       waiting: "\u7B49\u5F85\u4E0B\u4E00\u8F6E"
     }[job.state] || (a?.diagnostics?.bytes ? "\u6B63\u5728\u63A5\u6536\u4E0A\u6E38\u6570\u636E" : "\u7B49\u5F85\u4E0A\u6E38\u54CD\u5E94");
     node.textContent = a?.node || "\u5C31\u7EEA";
-    model.textContent = a?.model || "";
+    model.textContent = a ? `${a.model} \xB7 ${a.diagnostics?.stream !== false ? "\u6D41\u5F0F" : "\u975E\u6D41\u5F0F"}` : "";
     stats.textContent = job ? `\u7B2C ${job.round}${job.maxRounds ? " / " + job.maxRounds : ""} \u8F6E  \xB7  ${Math.max(0, Math.floor(((job.ended || Date.now()) - job.started) / 1e3))} \u79D2  \xB7  ${job.attemptCount} \u6B21\u5C1D\u8BD5` : "";
     if (!running && preferred) {
       status.textContent = "\u4E0B\u6B21\u751F\u6210\u5DF2\u5C31\u7EEA";
       node.textContent = preferred.name;
-      model.textContent = preferred.model;
+      model.textContent = `${preferred.model} \xB7 ${preferred.stream !== false ? "\u6D41\u5F0F" : "\u975E\u6D41\u5F0F"}`;
       stats.textContent = "\u4EC5\u4E0B\u4E00\u6B21\u751F\u6210\u4F18\u5148";
     }
     const nextContext = running ? job.id : "idle";
     const defaultTarget = running ? job.availableNodes?.find((n) => n.id !== a?.nodeId)?.id || "" : preferredNodeId;
     fill(
       choose,
-      running ? job.availableNodes?.map((n) => [n.id, `${n.name} \xB7 ${n.model}`]) || [] : [
+      running ? job.availableNodes?.map((n) => [
+        n.id,
+        `${n.name} \xB7 ${n.stream !== false ? "\u6D41\u5F0F" : "\u975E\u6D41\u5F0F"} \xB7 ${n.model}`
+      ]) || [] : [
         ["", "\u6309\u5DF2\u4FDD\u5B58\u7684\u4F18\u5148\u7EA7"],
-        ...savedNodes.map((n) => [n.id, `${n.name} \xB7 ${n.model}`])
+        ...savedNodes.map((n) => [
+          n.id,
+          `${n.name} \xB7 ${n.stream !== false ? "\u6D41\u5F0F" : "\u975E\u6D41\u5F0F"} \xB7 ${n.model}`
+        ])
       ],
       chooserContext === nextContext ? choose.value : defaultTarget
     );
@@ -550,6 +537,17 @@ function createTaskPanel(api, openRecords) {
   };
 }
 
+// server/url.js
+function completeApiUrl(value, protocol = "openai", enabled = true) {
+  const url = new URL(value);
+  let pathname = url.pathname.replace(/\/+$/, "");
+  if (enabled && protocol !== "gemini" && !/\/v\d+(?:beta\d*|alpha\d*)?(?:\/|$)/i.test(pathname) && !/\/(?:chat\/completions|messages|responses)$/.test(pathname)) {
+    pathname += "/v1";
+  }
+  url.pathname = pathname;
+  return url.href.replace(/\/+$/, "");
+}
+
 // extension/index.js
 var ctx = () => SillyTavern.getContext();
 var STATES = {
@@ -566,6 +564,8 @@ var root;
 var config;
 var refreshTimer;
 var snapshot;
+var hostConnection;
+var READY_STATUS = "API\u8FD8\u6CA1\u6302\u5C31\u7EEA";
 var savedConfig;
 var dirty = false;
 var editorRead;
@@ -611,81 +611,39 @@ function selected() {
 }
 function nativeSelected() {
   const c = ctx();
-  return savedConfig?.enabled && savedConfig?.nativeFirst && c.mainApi === "openai" && ["custom", "openai", "claude", "makersuite"].includes(
+  return savedConfig?.enabled && c.mainApi === "openai" && ["custom", "openai", "claude", "makersuite"].includes(
     c.chatCompletionSettings.chat_completion_source
   ) && !selected();
 }
-async function connect() {
-  if (dirty) throw new Error("\u8BF7\u5148\u4FDD\u5B58\u8BBE\u7F6E\u6216\u64A4\u9500\u4FEE\u6539");
-  bridge.cancel("connection_changed");
-  const c = ctx();
-  const settings = c.chatCompletionSettings;
-  if (!selected()) {
-    const saved = await c.executeSlashCommandsWithOptions("/api quiet=true");
-    c.extensionSettings.silent_failover = {
-      previous: {
-        api: saved.pipe,
-        values: Object.fromEntries(
-          [
-            "custom_url",
-            "custom_model",
-            "stream_openai",
-            "custom_include_body",
-            "custom_exclude_body",
-            "custom_include_headers"
-          ].map((k) => [k, settings[k]])
-        )
-      }
-    };
-  }
-  Object.assign(settings, {
-    custom_url: ENDPOINT,
-    custom_model: "failover-default",
-    stream_openai: false,
-    custom_include_body: "",
-    custom_exclude_body: "",
-    custom_include_headers: ""
-  });
-  config.enabled = true;
-  config.nativeFirst = false;
-  config = await bridge.api("/config", config);
-  savedConfig = structuredClone(config);
-  await c.executeSlashCommandsWithOptions("/api quiet=true custom");
-  for (const [id, value] of [
-    ["custom_api_url_text", ENDPOINT],
-    ["custom_model_id", "failover-default"]
-  ]) {
-    const field = document.getElementById(id);
-    if (field) {
-      field.value = value;
-      field.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-  }
-  const stream = document.getElementById("stream_toggle");
-  if (stream) {
-    stream.checked = false;
-    stream.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-  document.getElementById("api_button_openai")?.click();
-  c.saveSettingsDebounced();
-  render();
-  message("\u5DF2\u4F7F\u7528\u6545\u969C\u8F6C\u79FB\u8FDE\u63A5");
-}
-async function restore() {
+async function migrateLegacyConnection() {
+  if (!selected()) return;
   bridge.cancel("connection_changed");
   const c = ctx();
   const previous = c.extensionSettings.silent_failover?.previous;
-  if (!previous) {
-    message("\u6CA1\u6709\u5DF2\u4FDD\u5B58\u7684\u539F\u8FDE\u63A5");
-    return;
-  }
-  Object.assign(c.chatCompletionSettings, previous.values);
-  c.saveSettingsDebounced();
-  if (c.CONNECT_API_MAP[previous.api])
+  Object.assign(
+    c.chatCompletionSettings,
+    previous?.values || { custom_url: "", custom_model: "" }
+  );
+  if (previous && c.CONNECT_API_MAP[previous.api])
     await c.executeSlashCommandsWithOptions(`/api quiet=true ${previous.api}`);
-  delete c.extensionSettings.silent_failover.previous;
+  if (c.extensionSettings.silent_failover)
+    delete c.extensionSettings.silent_failover.previous;
+  for (const [id, key] of [
+    ["custom_api_url_text", "custom_url"],
+    ["custom_model_id", "custom_model"]
+  ]) {
+    const field = document.getElementById(id);
+    if (field) field.value = c.chatCompletionSettings[key] || "";
+  }
   c.saveSettingsDebounced();
-  message("\u5DF2\u6062\u590D\u539F\u8FDE\u63A5");
+}
+function updateReadiness() {
+  if (!hostConnection) return;
+  const available = nativeSelected() && (savedConfig.nativeFirst || savedConfig.nodes.some((n) => n.enabled));
+  if (available && hostConnection.online_status === "no_connection")
+    hostConnection.setOnlineStatus(READY_STATUS);
+  else if (!available && hostConnection.online_status === READY_STATUS)
+    hostConnection.setOnlineStatus("no_connection");
 }
 function labelInput(label, key, value, type = "text", extra = {}) {
   const box = el("label", { className: "sf-field" });
@@ -749,12 +707,6 @@ function editor(node = {
       min: 0,
       max: 99999,
       required: true
-    }),
-    labelInput("\u8282\u70B9\u8F93\u51FA\u4E0A\u9650", "maxTokens", node.maxTokens, "number", {
-      min: 1,
-      max: 2e6,
-      step: 1,
-      placeholder: "\u8DDF\u968F\u9152\u9986"
     })
   );
   const stream = el("label", { className: "sf-check" });
@@ -786,12 +738,21 @@ function editor(node = {
       ...node,
       id: node.id || crypto.randomUUID(),
       name: data.get("name"),
-      url: data.get("url"),
+      url: (() => {
+        try {
+          return completeApiUrl(
+            data.get("url"),
+            data.get("protocol"),
+            config.autoCompleteUrl !== false
+          );
+        } catch {
+          return data.get("url");
+        }
+      })(),
       model: data.get("model"),
       protocol: data.get("protocol"),
       key: data.get("key"),
       priority: Number(data.get("priority")),
-      maxTokens: data.get("maxTokens") === "" ? null : Number(data.get("maxTokens")),
       stream: streamInput.checked
     };
   };
@@ -861,7 +822,10 @@ function editor(node = {
       models.replaceChildren();
       modelStatus.textContent = "\u6B63\u5728\u83B7\u53D6\u6A21\u578B\u2026";
       try {
-        const result = await bridge.api("/models", { node: read() });
+        const result = await bridge.api("/models", {
+          node: read(),
+          settings: { autoCompleteUrl: config.autoCompleteUrl }
+        });
         if (revision !== lookupRevision || !form.isConnected) return;
         availableModels = result.models;
         search.value = "";
@@ -930,12 +894,6 @@ async function commitSettings() {
       throw new Error("\u8BF7\u586B\u5199\u8303\u56F4\u5185\u7684\u6570\u503C\u8BBE\u7F6E");
   }
   editorRead?.();
-  const enabledNative = config.nativeFirst && !savedConfig.nativeFirst;
-  if (enabledNative && selected()) await restore();
-  if (enabledNative && (ctx().mainApi !== "openai" || !["custom", "openai", "claude", "makersuite"].includes(
-    ctx().chatCompletionSettings.chat_completion_source
-  ) || selected()))
-    throw new Error("\u8BF7\u5148\u9009\u62E9\u652F\u6301\u8054\u52A8\u7684\u539F\u751F API \u8FDE\u63A5");
   const content = root.querySelector(".inline-drawer-content");
   content.inert = true;
   let updated;
@@ -946,6 +904,7 @@ async function commitSettings() {
   }
   config = updated;
   savedConfig = structuredClone(updated);
+  updateReadiness();
   dirty = false;
   render();
   markDirty();
@@ -1006,13 +965,26 @@ async function runNodeTest(node) {
 function renderNative() {
   const area = root.querySelector("[data-native]");
   area.replaceChildren();
-  if (!config?.nativeFirst) return;
+  if (!config) return;
   const settings = ctx().chatCompletionSettings;
   const source = settings.chat_completion_source;
   const supported = ctx().mainApi === "openai" && ["custom", "openai", "claude", "makersuite"].includes(source) && !selected();
   const row = el("div", { className: "sf-native" });
   const text = el("div", { className: "sf-node-text" });
-  text.append(el("strong", {}, "\u9996\u9009 \xB7 \u9152\u9986\u539F\u751F\u8FDE\u63A5"));
+  text.append(el("strong", {}, "\u9152\u9986\u539F\u751F API"));
+  const enabled = el("input", {
+    type: "checkbox",
+    checked: config.nativeFirst !== false
+  });
+  enabled.setAttribute("aria-label", "\u542F\u7528 \u9152\u9986\u539F\u751F API");
+  enabled.onchange = () => void saveConfig({ nativeFirst: enabled.checked });
+  text.append(
+    el(
+      "small",
+      { className: "sf-muted" },
+      settings.stream_openai ? "\u6D41\u5F0F\u8BF7\u6C42" : "\u975E\u6D41\u5F0F\u8BF7\u6C42"
+    )
+  );
   if (supported) {
     const model = settings[{
       custom: "custom_model",
@@ -1039,7 +1011,7 @@ function renderNative() {
       )
     );
   }
-  row.append(el("i", { className: "fa-solid fa-link" }), text);
+  row.append(enabled, text);
   area.append(row);
 }
 function render() {
@@ -1048,7 +1020,8 @@ function render() {
   controls.replaceChildren();
   for (const [key, label] of [
     ["enabled", "\u542F\u7528\u6545\u969C\u8F6C\u79FB"],
-    ["loop", "\u81EA\u52A8\u5FAA\u73AF\u91CD\u8BD5"]
+    ["loop", "\u81EA\u52A8\u5FAA\u73AF\u91CD\u8BD5"],
+    ["autoCompleteUrl", "\u81EA\u52A8\u8865\u5168 API \u5730\u5740"]
   ]) {
     const wrap = el("label", { className: "sf-check" });
     const input = el("input", { type: "checkbox", checked: config[key] });
@@ -1057,15 +1030,6 @@ function render() {
     wrap.append(input, document.createTextNode(label));
     controls.append(wrap);
   }
-  const native = el("label", { className: "sf-check" });
-  const nativeInput = el("input", {
-    type: "checkbox",
-    checked: config.nativeFirst
-  });
-  nativeInput.setAttribute("aria-label", "\u539F\u751F\u8FDE\u63A5\u4F18\u5148");
-  nativeInput.onchange = () => void guarded(() => saveConfig({ nativeFirst: nativeInput.checked }));
-  native.append(nativeInput, document.createTextNode("\u539F\u751F\u8FDE\u63A5\u4F18\u5148"));
-  controls.append(native);
   renderNative();
   const interval = labelInput(
     "\u8F6E\u6B21\u95F4\u9694\uFF08\u79D2\uFF09",
@@ -1155,6 +1119,11 @@ function render() {
     text.append(
       el("strong", {}, `${n.priority}. ${n.name}`),
       el("span", { className: "sf-muted" }, n.model),
+      el(
+        "small",
+        { className: "sf-stream" },
+        n.stream !== false ? "\u6D41\u5F0F\u8BF7\u6C42" : "\u975E\u6D41\u5F0F\u8BF7\u6C42"
+      ),
       el("small", { className: "sf-muted" }, n.url),
       el("small", {}, n.keyHint || "\u672A\u8BBE\u7F6E Key")
     );
@@ -1200,10 +1169,10 @@ function render() {
   advanced.closest("details").hidden = config.waitMode !== "limited";
   advanced.replaceChildren();
   for (const [key, label, min, max] of [
-    ["timeoutSeconds", "\u5355\u8282\u70B9\u603B\u8D85\u65F6\uFF08\u79D2\uFF0C0 \u5173\u95ED\uFF09", 0, 86400],
-    ["headerSeconds", "\u54CD\u5E94\u5934\u8D85\u65F6\uFF08\u79D2\uFF0C0 \u5173\u95ED\uFF09", 0, 86400],
-    ["firstTokenSeconds", "\u9996\u6570\u636E\u8D85\u65F6\uFF08\u79D2\uFF0C0 \u5173\u95ED\uFF09", 0, 86400],
-    ["idleSeconds", "\u6570\u636E\u95F4\u9694\u8D85\u65F6\uFF08\u79D2\uFF0C0 \u5173\u95ED\uFF09", 0, 86400]
+    ["timeoutSeconds", "\u5B8C\u6574\u56DE\u590D\u6700\u591A\u7B49\u591A\u4E45\uFF08\u79D2\uFF0C0 \u4E0D\u9650\uFF09", 0, 86400],
+    ["headerSeconds", "\u5B8C\u5168\u6CA1\u56DE\u5E94\u65F6\u7B49\u591A\u4E45\uFF08\u79D2\uFF0C0 \u4E0D\u9650\uFF09", 0, 86400],
+    ["firstTokenSeconds", "\u5F00\u59CB\u56DE\u5E94\u540E\uFF0C\u9996\u6279\u6570\u636E\u7B49\u591A\u4E45\uFF08\u79D2\uFF0C0 \u4E0D\u9650\uFF09", 0, 86400],
+    ["idleSeconds", "\u63A5\u6536\u6570\u636E\u4E2D\uFF0C\u505C\u987F\u591A\u4E45\u5C31\u6362\uFF08\u79D2\uFF0C0 \u4E0D\u9650\uFF09", 0, 86400]
   ]) {
     const field = labelInput(label, key, config[key], "number", { min, max });
     field.querySelector("input").disabled = config.waitMode === "patient";
@@ -1426,7 +1395,8 @@ function watch(event, fn) {
   subscriptions.push([event, fn]);
 }
 function capture(type, options, dry) {
-  if (!dry && (selected() || nativeSelected())) {
+  updateReadiness();
+  if (!dry && nativeSelected()) {
     const c = ctx();
     snapshot = {
       type,
@@ -1478,15 +1448,7 @@ async function boot() {
       document.getElementById("extensions-settings-button")?.querySelector(".drawer-toggle")?.click();
     void refreshRecords();
   });
-  const connectButton = el(
-    "button",
-    { type: "button", className: "menu_button" },
-    "\u4EC5\u4F7F\u7528\u5907\u7528\u8282\u70B9"
-  );
-  connectButton.onclick = () => void guarded(connect);
   actions.append(
-    connectButton,
-    button("rotate-left", "\u6062\u590D\u539F\u8FDE\u63A5", () => void guarded(restore)),
     button("plus", "\u65B0\u589E\u8282\u70B9", () => {
       if (config) editor();
     }),
@@ -1497,6 +1459,7 @@ async function boot() {
         if (dirty) throw new Error("\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u8BF7\u5148\u4FDD\u5B58\u6216\u64A4\u9500");
         config = await bridge.api("/config");
         savedConfig = structuredClone(config);
+        updateReadiness();
         render();
         message("\u670D\u52A1\u7AEF\u5DF2\u8FDE\u63A5");
       })
@@ -1567,6 +1530,7 @@ async function boot() {
   }
   watch(ctx().eventTypes.SETTINGS_UPDATED, renderNative);
   watch(ctx().eventTypes.CHATCOMPLETION_SOURCE_CHANGED, renderNative);
+  watch(ctx().eventTypes.ONLINE_STATUS_CHANGED, updateReadiness);
   watch(ctx().eventTypes.GENERATION_STOPPED, () => bridge.cancel("user_stop"));
   watch(ctx().eventTypes.CHAT_CHANGED, () => {
     bridge.cancel("chat_changed");
@@ -1580,6 +1544,7 @@ async function boot() {
   subscriptions.push(["pagehide", unload]);
   refreshTimer = setInterval(() => {
     renderNative();
+    updateReadiness();
     if (!document.hidden) {
       if (root.querySelector("[data-history]").open) void refreshRecords();
       if (config)
@@ -1593,6 +1558,9 @@ async function boot() {
     }
   }, 1e3);
   await guarded(async () => {
+    const hostPath = "/script.js";
+    hostConnection = await import(hostPath);
+    await migrateLegacyConnection();
     config = await bridge.api("/config");
     savedConfig = structuredClone(config);
     render();
@@ -1615,8 +1583,8 @@ async function onDisable() {
   if (bridge && savedConfig)
     await bridge.api("/config", { ...savedConfig, enabled: false }).catch(() => {
     });
-  if (selected()) await restore().catch(() => {
-  });
+  savedConfig = null;
+  updateReadiness();
   bridge?.dispose();
   for (const c of testControllers) c.abort();
   panel?.dispose();
@@ -1640,7 +1608,8 @@ bridge = installAdapter(
       return s;
     },
     failed: restoreFailed,
-    takePreferredNode: (generation) => panel?.takePreferredNode(generation)
+    takePreferredNode: (generation) => panel?.takePreferredNode(generation),
+    config: () => savedConfig
   }
 );
 ctx().eventSource.on(ctx().eventTypes.APP_READY, () => {

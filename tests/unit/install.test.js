@@ -63,3 +63,74 @@ test("bundled installer installs and upgrades artifacts while preserving existin
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("installer uses Docker nested config and requires disambiguation for custom config", () => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), "sf-docker-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "sillytavern", version: "1.18.0" }),
+    );
+    fs.writeFileSync(path.join(root, "server.js"), "");
+    fs.mkdirSync(path.join(root, "config"));
+    const nested = path.join(root, "config/config.yaml");
+    fs.writeFileSync(nested, "enableServerPlugins: false\nport: 9000\n");
+    const run = (...args) =>
+      spawnSync(
+        process.execPath,
+        ["release/install.mjs", "--target", root, ...args],
+        { encoding: "utf8" },
+      );
+    expect(run().status).toBe(0);
+    expect(parse(fs.readFileSync(nested, "utf8"))).toEqual({
+      enableServerPlugins: true,
+      port: 9000,
+    });
+    expect(fs.existsSync(path.join(root, "config.yaml"))).toBe(false);
+    fs.writeFileSync(
+      path.join(root, "config.yaml"),
+      "enableServerPlugins: false\n",
+    );
+    expect(run().status).not.toBe(0);
+    expect(run("--config", "config/config.yaml").status).toBe(0);
+    expect(
+      parse(fs.readFileSync(path.join(root, "config.yaml"), "utf8"))
+        .enableServerPlugins,
+    ).toBe(false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("installer preserves the config.yaml symlink used by the official Docker image", ({
+  skip,
+}) => {
+  const root = fs.mkdtempSync(path.join(tmpdir(), "sf-config-link-"));
+  try {
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "sillytavern", version: "1.18.0" }),
+    );
+    fs.writeFileSync(path.join(root, "server.js"), "");
+    fs.mkdirSync(path.join(root, "config"));
+    const file = path.join(root, "config/config.yaml"),
+      link = path.join(root, "config.yaml");
+    fs.writeFileSync(file, "enableServerPlugins: false\n");
+    try {
+      fs.symlinkSync(file, link, "file");
+    } catch (error) {
+      if (error.code === "EPERM") return skip();
+      throw error;
+    }
+    const result = spawnSync(
+      process.execPath,
+      ["release/install.mjs", "--target", root],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(parse(fs.readFileSync(file, "utf8")).enableServerPlugins).toBe(true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

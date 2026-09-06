@@ -1,6 +1,7 @@
 import { API, ENDPOINT, installAdapter } from "./adapter.js";
 import { VERSION } from "../server/version.js";
 import { createTaskPanel } from "./panel.js";
+import { completeApiUrl } from "../server/url.js";
 const ctx = () => SillyTavern.getContext();
 const STATES = {
   running: "尝试中",
@@ -12,6 +13,8 @@ const STATES = {
   invalid: "未执行",
 };
 let bridge, root, config, refreshTimer, snapshot;
+let hostConnection;
+const READY_STATUS = "API还没挂就绪";
 let savedConfig,
   dirty = false,
   editorRead,
@@ -63,7 +66,6 @@ function nativeSelected() {
   const c = ctx();
   return (
     savedConfig?.enabled &&
-    savedConfig?.nativeFirst &&
     c.mainApi === "openai" &&
     ["custom", "openai", "claude", "makersuite"].includes(
       c.chatCompletionSettings.chat_completion_source,
@@ -71,77 +73,37 @@ function nativeSelected() {
     !selected()
   );
 }
-async function connect() {
-  if (dirty) throw new Error("请先保存设置或撤销修改");
-  bridge.cancel("connection_changed");
-  const c = ctx();
-  const settings = c.chatCompletionSettings;
-  if (!selected()) {
-    const saved = await c.executeSlashCommandsWithOptions("/api quiet=true");
-    c.extensionSettings.silent_failover = {
-      previous: {
-        api: saved.pipe,
-        values: Object.fromEntries(
-          [
-            "custom_url",
-            "custom_model",
-            "stream_openai",
-            "custom_include_body",
-            "custom_exclude_body",
-            "custom_include_headers",
-          ].map((k) => [k, settings[k]]),
-        ),
-      },
-    };
-  }
-  Object.assign(settings, {
-    custom_url: ENDPOINT,
-    custom_model: "failover-default",
-    stream_openai: false,
-    custom_include_body: "",
-    custom_exclude_body: "",
-    custom_include_headers: "",
-  });
-  config.enabled = true;
-  config.nativeFirst = false;
-  config = await bridge.api("/config", config);
-  savedConfig = structuredClone(config);
-  await c.executeSlashCommandsWithOptions("/api quiet=true custom");
-  for (const [id, value] of [
-    ["custom_api_url_text", ENDPOINT],
-    ["custom_model_id", "failover-default"],
-  ]) {
-    const field = document.getElementById(id);
-    if (field) {
-      field.value = value;
-      field.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-  }
-  const stream = document.getElementById("stream_toggle");
-  if (stream) {
-    stream.checked = false;
-    stream.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-  document.getElementById("api_button_openai")?.click();
-  c.saveSettingsDebounced();
-  render();
-  message("已使用故障转移连接");
-}
-async function restore() {
+async function migrateLegacyConnection() {
+  if (!selected()) return;
   bridge.cancel("connection_changed");
   const c = ctx();
   const previous = c.extensionSettings.silent_failover?.previous;
-  if (!previous) {
-    message("没有已保存的原连接");
-    return;
-  }
-  Object.assign(c.chatCompletionSettings, previous.values);
-  c.saveSettingsDebounced();
-  if (c.CONNECT_API_MAP[previous.api])
+  Object.assign(
+    c.chatCompletionSettings,
+    previous?.values || { custom_url: "", custom_model: "" },
+  );
+  if (previous && c.CONNECT_API_MAP[previous.api])
     await c.executeSlashCommandsWithOptions(`/api quiet=true ${previous.api}`);
-  delete c.extensionSettings.silent_failover.previous;
+  if (c.extensionSettings.silent_failover)
+    delete c.extensionSettings.silent_failover.previous;
+  for (const [id, key] of [
+    ["custom_api_url_text", "custom_url"],
+    ["custom_model_id", "custom_model"],
+  ]) {
+    const field = document.getElementById(id);
+    if (field) field.value = c.chatCompletionSettings[key] || "";
+  }
   c.saveSettingsDebounced();
-  message("已恢复原连接");
+}
+function updateReadiness() {
+  if (!hostConnection) return;
+  const available =
+    nativeSelected() &&
+    (savedConfig.nativeFirst || savedConfig.nodes.some((n) => n.enabled));
+  if (available && hostConnection.online_status === "no_connection")
+    hostConnection.setOnlineStatus(READY_STATUS);
+  else if (!available && hostConnection.online_status === READY_STATUS)
+    hostConnection.setOnlineStatus("no_connection");
 }
 function labelInput(label, key, value, type = "text", extra = {}) {
   const box = el("label", { className: "sf-field" });
@@ -208,12 +170,6 @@ function editor(
       max: 99999,
       required: true,
     }),
-    labelInput("节点输出上限", "maxTokens", node.maxTokens, "number", {
-      min: 1,
-      max: 2000000,
-      step: 1,
-      placeholder: "跟随酒馆",
-    }),
   );
   const stream = el("label", { className: "sf-check" });
   const streamInput = el("input", {
@@ -244,13 +200,21 @@ function editor(
       ...node,
       id: node.id || crypto.randomUUID(),
       name: data.get("name"),
-      url: data.get("url"),
+      url: (() => {
+        try {
+          return completeApiUrl(
+            data.get("url"),
+            data.get("protocol"),
+            config.autoCompleteUrl !== false,
+          );
+        } catch {
+          return data.get("url");
+        }
+      })(),
       model: data.get("model"),
       protocol: data.get("protocol"),
       key: data.get("key"),
       priority: Number(data.get("priority")),
-      maxTokens:
-        data.get("maxTokens") === "" ? null : Number(data.get("maxTokens")),
       stream: streamInput.checked,
     };
   };
@@ -324,7 +288,10 @@ function editor(
         models.replaceChildren();
         modelStatus.textContent = "正在获取模型…";
         try {
-          const result = await bridge.api("/models", { node: read() });
+          const result = await bridge.api("/models", {
+            node: read(),
+            settings: { autoCompleteUrl: config.autoCompleteUrl },
+          });
           if (revision !== lookupRevision || !form.isConnected) return;
           availableModels = result.models;
           search.value = "";
@@ -395,17 +362,6 @@ async function commitSettings() {
       throw new Error("请填写范围内的数值设置");
   }
   editorRead?.();
-  const enabledNative = config.nativeFirst && !savedConfig.nativeFirst;
-  if (enabledNative && selected()) await restore();
-  if (
-    enabledNative &&
-    (ctx().mainApi !== "openai" ||
-      !["custom", "openai", "claude", "makersuite"].includes(
-        ctx().chatCompletionSettings.chat_completion_source,
-      ) ||
-      selected())
-  )
-    throw new Error("请先选择支持联动的原生 API 连接");
   const content = root.querySelector(".inline-drawer-content");
   content.inert = true;
   let updated;
@@ -416,6 +372,7 @@ async function commitSettings() {
   }
   config = updated;
   savedConfig = structuredClone(updated);
+  updateReadiness();
   dirty = false;
   render();
   markDirty();
@@ -483,7 +440,7 @@ async function runNodeTest(node) {
 function renderNative() {
   const area = root.querySelector("[data-native]");
   area.replaceChildren();
-  if (!config?.nativeFirst) return;
+  if (!config) return;
   const settings = ctx().chatCompletionSettings;
   const source = settings.chat_completion_source;
   const supported =
@@ -492,7 +449,20 @@ function renderNative() {
     !selected();
   const row = el("div", { className: "sf-native" });
   const text = el("div", { className: "sf-node-text" });
-  text.append(el("strong", {}, "首选 · 酒馆原生连接"));
+  text.append(el("strong", {}, "酒馆原生 API"));
+  const enabled = el("input", {
+    type: "checkbox",
+    checked: config.nativeFirst !== false,
+  });
+  enabled.setAttribute("aria-label", "启用 酒馆原生 API");
+  enabled.onchange = () => void saveConfig({ nativeFirst: enabled.checked });
+  text.append(
+    el(
+      "small",
+      { className: "sf-muted" },
+      settings.stream_openai ? "流式请求" : "非流式请求",
+    ),
+  );
   if (supported) {
     const model =
       settings[
@@ -526,7 +496,7 @@ function renderNative() {
       ),
     );
   }
-  row.append(el("i", { className: "fa-solid fa-link" }), text);
+  row.append(enabled, text);
   area.append(row);
 }
 function render() {
@@ -536,6 +506,7 @@ function render() {
   for (const [key, label] of [
     ["enabled", "启用故障转移"],
     ["loop", "自动循环重试"],
+    ["autoCompleteUrl", "自动补全 API 地址"],
   ]) {
     const wrap = el("label", { className: "sf-check" });
     const input = el("input", { type: "checkbox", checked: config[key] });
@@ -545,16 +516,6 @@ function render() {
     wrap.append(input, document.createTextNode(label));
     controls.append(wrap);
   }
-  const native = el("label", { className: "sf-check" });
-  const nativeInput = el("input", {
-    type: "checkbox",
-    checked: config.nativeFirst,
-  });
-  nativeInput.setAttribute("aria-label", "原生连接优先");
-  nativeInput.onchange = () =>
-    void guarded(() => saveConfig({ nativeFirst: nativeInput.checked }));
-  native.append(nativeInput, document.createTextNode("原生连接优先"));
-  controls.append(native);
   renderNative();
   const interval = labelInput(
     "轮次间隔（秒）",
@@ -646,6 +607,11 @@ function render() {
     text.append(
       el("strong", {}, `${n.priority}. ${n.name}`),
       el("span", { className: "sf-muted" }, n.model),
+      el(
+        "small",
+        { className: "sf-stream" },
+        n.stream !== false ? "流式请求" : "非流式请求",
+      ),
       el("small", { className: "sf-muted" }, n.url),
       el("small", {}, n.keyHint || "未设置 Key"),
     );
@@ -693,10 +659,10 @@ function render() {
   advanced.closest("details").hidden = config.waitMode !== "limited";
   advanced.replaceChildren();
   for (const [key, label, min, max] of [
-    ["timeoutSeconds", "单节点总超时（秒，0 关闭）", 0, 86400],
-    ["headerSeconds", "响应头超时（秒，0 关闭）", 0, 86400],
-    ["firstTokenSeconds", "首数据超时（秒，0 关闭）", 0, 86400],
-    ["idleSeconds", "数据间隔超时（秒，0 关闭）", 0, 86400],
+    ["timeoutSeconds", "完整回复最多等多久（秒，0 不限）", 0, 86400],
+    ["headerSeconds", "完全没回应时等多久（秒，0 不限）", 0, 86400],
+    ["firstTokenSeconds", "开始回应后，首批数据等多久（秒，0 不限）", 0, 86400],
+    ["idleSeconds", "接收数据中，停顿多久就换（秒，0 不限）", 0, 86400],
   ]) {
     const field = labelInput(label, key, config[key], "number", { min, max });
     field.querySelector("input").disabled = config.waitMode === "patient";
@@ -931,7 +897,8 @@ function watch(event, fn) {
   subscriptions.push([event, fn]);
 }
 function capture(type, options, dry) {
-  if (!dry && (selected() || nativeSelected())) {
+  updateReadiness();
+  if (!dry && nativeSelected()) {
     const c = ctx();
     snapshot = {
       type,
@@ -987,15 +954,7 @@ async function boot() {
         ?.click();
     void refreshRecords();
   });
-  const connectButton = el(
-    "button",
-    { type: "button", className: "menu_button" },
-    "仅使用备用节点",
-  );
-  connectButton.onclick = () => void guarded(connect);
   actions.append(
-    connectButton,
-    button("rotate-left", "恢复原连接", () => void guarded(restore)),
     button("plus", "新增节点", () => {
       if (config) editor();
     }),
@@ -1007,6 +966,7 @@ async function boot() {
           if (dirty) throw new Error("有未保存的修改，请先保存或撤销");
           config = await bridge.api("/config");
           savedConfig = structuredClone(config);
+          updateReadiness();
           render();
           message("服务端已连接");
         }),
@@ -1079,6 +1039,7 @@ async function boot() {
   }
   watch(ctx().eventTypes.SETTINGS_UPDATED, renderNative);
   watch(ctx().eventTypes.CHATCOMPLETION_SOURCE_CHANGED, renderNative);
+  watch(ctx().eventTypes.ONLINE_STATUS_CHANGED, updateReadiness);
   watch(ctx().eventTypes.GENERATION_STOPPED, () => bridge.cancel("user_stop"));
   watch(ctx().eventTypes.CHAT_CHANGED, () => {
     bridge.cancel("chat_changed");
@@ -1092,6 +1053,7 @@ async function boot() {
   subscriptions.push(["pagehide", unload]);
   refreshTimer = setInterval(() => {
     renderNative();
+    updateReadiness();
     if (!document.hidden) {
       if (root.querySelector("[data-history]").open) void refreshRecords();
       if (config)
@@ -1107,6 +1069,9 @@ async function boot() {
     }
   }, 1000);
   await guarded(async () => {
+    const hostPath = "/script.js";
+    hostConnection = await import(hostPath);
+    await migrateLegacyConnection();
     config = await bridge.api("/config");
     savedConfig = structuredClone(config);
     render();
@@ -1130,7 +1095,8 @@ export async function onDisable() {
     await bridge
       .api("/config", { ...savedConfig, enabled: false })
       .catch(() => {});
-  if (selected()) await restore().catch(() => {});
+  savedConfig = null;
+  updateReadiness();
   bridge?.dispose();
   for (const c of testControllers) c.abort();
   panel?.dispose();
@@ -1156,6 +1122,7 @@ bridge = installAdapter(
     },
     failed: restoreFailed,
     takePreferredNode: (generation) => panel?.takePreferredNode(generation),
+    config: () => savedConfig,
   },
 );
 ctx().eventSource.on(ctx().eventTypes.APP_READY, () => {

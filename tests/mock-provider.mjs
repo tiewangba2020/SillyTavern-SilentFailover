@@ -9,7 +9,7 @@ export async function mockProvider(port=0) {
     const node=req.url.split('/')[1];calls.push({node,body:JSON.parse(body),authorization:req.headers.authorization});active++;res.on('close',()=>active--);
     if(mode==='parameters') {
       const p=JSON.parse(body);
-      if(node==='A'||p.temperature>1||p.max_tokens>4096) {
+      if(node==='A'||p.temperature>1) {
         res.writeHead(node==='A'?403:400,{'Content-Type':'application/json'});
         res.end(JSON.stringify({error:{message:node==='A'?'预扣费额度失败':'temperature or max_tokens invalid',code:node==='A'?'insufficient_user_quota':'invalid_request_error'}}));return;
       }

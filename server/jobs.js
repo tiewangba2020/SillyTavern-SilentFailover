@@ -3,6 +3,8 @@ import { abortError, failureRecord, sleep, CANCEL_REASONS } from "./errors.js";
 import { adaptParameters } from "./parameters.js";
 import { completionSummary, generationType } from "./diagnostics.js";
 import { VERSION } from "./version.js";
+import { completeApiUrl } from "./url.js";
+import { Failure } from "./errors.js";
 const terminal = new Set(["succeeded", "exhausted", "cancelled", "invalid"]);
 export class Jobs {
   constructor(store, options = {}) {
@@ -116,7 +118,6 @@ export class Jobs {
               n.model !== job.nativeNode.model ||
               n.key !== job.nativeNode.key ||
               n.stream !== job.nativeNode.stream ||
-              (n.maxTokens ?? null) !== (job.nativeNode.maxTokens ?? null) ||
               (n.protocol || "openai") !== job.nativeNode.protocol,
           )
           .sort((a, b) => a.priority - b.priority);
@@ -137,10 +138,11 @@ export class Jobs {
           }
           nodes.unshift(...nodes.splice(index, 1));
         }
-        job.availableNodes = nodes.map(({ id, name, model }) => ({
+        job.availableNodes = nodes.map(({ id, name, model, stream }) => ({
           id,
           name,
           model,
+          stream,
         }));
         if (!nodes.length) {
           job.state = "invalid";
@@ -212,8 +214,20 @@ export class Jobs {
             job.dropped++;
           }
           try {
+            if (node.unavailableReason)
+              throw new Failure(node.unavailableReason, {
+                category: "configuration",
+                phase: "configuration",
+              });
             const result = await this.attempt(
-              node,
+              {
+                ...node,
+                url: completeApiUrl(
+                  node.url,
+                  node.protocol,
+                  settings.autoCompleteUrl !== false,
+                ),
+              },
               adapted.payload,
               attemptSignal,
               settings,

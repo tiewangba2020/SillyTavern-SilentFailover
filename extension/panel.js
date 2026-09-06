@@ -219,14 +219,16 @@ export function createTaskPanel(api, openRecords) {
         }[job.state] ||
         (a?.diagnostics?.bytes ? "正在接收上游数据" : "等待上游响应");
     node.textContent = a?.node || "就绪";
-    model.textContent = a?.model || "";
+    model.textContent = a
+      ? `${a.model} · ${a.diagnostics?.stream !== false ? "流式" : "非流式"}`
+      : "";
     stats.textContent = job
       ? `第 ${job.round}${job.maxRounds ? " / " + job.maxRounds : ""} 轮  ·  ${Math.max(0, Math.floor(((job.ended || Date.now()) - job.started) / 1000))} 秒  ·  ${job.attemptCount} 次尝试`
       : "";
     if (!running && preferred) {
       status.textContent = "下次生成已就绪";
       node.textContent = preferred.name;
-      model.textContent = preferred.model;
+      model.textContent = `${preferred.model} · ${preferred.stream !== false ? "流式" : "非流式"}`;
       stats.textContent = "仅下一次生成优先";
     }
     const nextContext = running ? job.id : "idle";
@@ -236,10 +238,16 @@ export function createTaskPanel(api, openRecords) {
     fill(
       choose,
       running
-        ? job.availableNodes?.map((n) => [n.id, `${n.name} · ${n.model}`]) || []
+        ? job.availableNodes?.map((n) => [
+            n.id,
+            `${n.name} · ${n.stream !== false ? "流式" : "非流式"} · ${n.model}`,
+          ]) || []
         : [
             ["", "按已保存的优先级"],
-            ...savedNodes.map((n) => [n.id, `${n.name} · ${n.model}`]),
+            ...savedNodes.map((n) => [
+              n.id,
+              `${n.name} · ${n.stream !== false ? "流式" : "非流式"} · ${n.model}`,
+            ]),
           ],
       chooserContext === nextContext ? choose.value : defaultTarget,
     );

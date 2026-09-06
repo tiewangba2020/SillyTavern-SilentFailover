@@ -21,6 +21,7 @@ test("native model pagination filters Gemini methods and keeps key out of URLs/r
   let calls = 0;
   vi.stubGlobal("fetch", async (url, options) => {
     expect(String(url)).not.toContain("test-private-key");
+    expect(new URL(url).pathname).toBe("/v1beta/models");
     expect(options.headers["x-goog-api-key"]).toBe("test-private-key");
     calls++;
     return Response.json(calls === 1 ? { models: [{ name: "models/text-one", supportedGenerationMethods: ["generateContent"] }, { name: "models/embed", supportedGenerationMethods: ["embedContent"] }], nextPageToken: "page2" } : { models: [{ name: "models/text-two", supportedGenerationMethods: ["generateContent"] }] });
