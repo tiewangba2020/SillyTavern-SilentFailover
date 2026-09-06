@@ -27,7 +27,17 @@ export class Jobs {
     this.sweep = setInterval(() => this.expire(), Math.min(this.leaseMs, 5000));
     this.sweep.unref?.();
   }
-  create(id, input, { testNode, nativeNode = null, generation } = {}) {
+  create(
+    id,
+    input,
+    {
+      testNode,
+      previewNode = null,
+      nativeNode = null,
+      generation,
+      testSettings,
+    } = {},
+  ) {
     if (typeof id !== "string" || !id.length || id.length > 120)
       throw new Error("任务 ID 无效");
     if (this.jobs.has(id)) return this.get(id, true);
@@ -53,6 +63,9 @@ export class Jobs {
       controller: new AbortController(),
       payload: null,
       testNode,
+      previewNode,
+      testSettings,
+      manualSwitches: [],
       nativeNode,
       mode: testNode ? "node_test" : nativeNode ? "native_first" : "fallback",
     };
@@ -81,12 +94,18 @@ export class Jobs {
     try {
       while (!signal.aborted) {
         const config = structuredClone(this.store.config);
+        job.maxRounds = config.loop ? config.maxRounds || 0 : 1;
+        if (job.maxRounds && job.round >= job.maxRounds) {
+          job.state = "exhausted";
+          job.reason = "已达到总轮次上限";
+          break;
+        }
         if (!config.enabled && !job.testNode) {
           job.state = "cancelled";
           job.reason = "插件已停用";
           break;
         }
-        const nodes = config.nodes
+        const nodes = (job.previewNode ? [job.previewNode] : config.nodes)
           .filter((n) => (job.testNode ? n.id === job.testNode : n.enabled))
           .filter(
             (n) =>
@@ -100,6 +119,11 @@ export class Jobs {
           )
           .sort((a, b) => a.priority - b.priority);
         if (job.nativeNode && !job.testNode) nodes.unshift(job.nativeNode);
+        job.availableNodes = nodes.map(({ id, name, model }) => ({
+          id,
+          name,
+          model,
+        }));
         if (!nodes.length) {
           job.state = "invalid";
           job.reason = "没有可用的启用节点";
@@ -107,14 +131,36 @@ export class Jobs {
         }
         job.round++;
         job.state = "running";
-        for (const node of nodes) {
+        for (let index = 0; index < nodes.length; index++) {
+          if (job.pendingSwitch) {
+            const target = nodes.findIndex((n) => n.id === job.pendingSwitch);
+            delete job.pendingSwitch;
+            if (target >= 0) index = target;
+          }
+          const node = nodes[index];
           if (signal.aborted) throw signal.reason;
+          job.attemptController = new AbortController();
+          const attemptSignal = AbortSignal.any([
+            signal,
+            job.attemptController.signal,
+          ]);
           const retry = retryTimes.get(node.id) || 0;
           if (retry > Date.now()) {
             job.nextAttemptAt = retry;
-            await sleep(retry - Date.now(), signal);
+            try {
+              await sleep(retry - Date.now(), attemptSignal);
+            } catch (e) {
+              if (signal.aborted) throw e;
+              if (job.pendingSwitch) {
+                index--;
+                continue;
+              }
+              throw e;
+            }
             delete job.nextAttemptAt;
           }
+          const settings =
+            job.testSettings || structuredClone(this.store.config);
           const adapted = adaptParameters(node, job.payload);
           const entry = {
             nodeId: node.id,
@@ -127,13 +173,17 @@ export class Jobs {
             diagnostics: {
               protocol: node.protocol || "openai",
               stream: node.stream !== false,
+              waitMode: settings.waitMode,
               timeouts: Object.fromEntries(
                 [
                   "timeoutSeconds",
                   "headerSeconds",
                   "firstTokenSeconds",
                   "idleSeconds",
-                ].map((k) => [k, config[k]]),
+                ].map((k) => [
+                  k,
+                  settings.waitMode === "patient" ? 0 : settings[k],
+                ]),
               ),
             },
           };
@@ -147,11 +197,12 @@ export class Jobs {
             const result = await this.attempt(
               node,
               adapted.payload,
-              signal,
-              config,
+              attemptSignal,
+              settings,
               entry.diagnostics,
             );
             if (signal.aborted) throw signal.reason;
+            if (job.pendingSwitch) throw abortError();
             entry.state = "succeeded";
             entry.diagnostics.completion = completionSummary(result);
             entry.ms = Date.now() - entry.started;
@@ -165,6 +216,16 @@ export class Jobs {
               entry.cancelReason = job.cancelReason || "client_aborted";
               throw signal.reason;
             }
+            if (job.pendingSwitch) {
+              entry.state = "cancelled";
+              entry.cancelReason = "manual_switch";
+              entry.category = "user";
+              entry.phase = "switch";
+              entry.code = "manual_switch";
+              entry.message = "用户手动切换节点，已丢弃未交付结果";
+              index--;
+              continue;
+            }
             entry.state = "failed";
             Object.assign(
               entry,
@@ -176,10 +237,19 @@ export class Jobs {
             );
             if (Number.isFinite(error.retryAt))
               retryTimes.set(node.id, error.retryAt);
+          } finally {
+            job.attemptController = null;
           }
         }
-        if (job.testNode || !this.store.config.loop) {
+        if (
+          job.testNode ||
+          !this.store.config.loop ||
+          (job.maxRounds && job.round >= job.maxRounds)
+        ) {
           job.state = "exhausted";
+          job.reason = job.testNode
+            ? "节点测试失败"
+            : "已达到总轮次上限或循环未开启";
           break;
         }
         job.state = "waiting";
@@ -213,6 +283,10 @@ export class Jobs {
     job.ended = Date.now();
     job.payload = null;
     job.nativeNode = null;
+    job.previewNode = null;
+    job.testSettings = null;
+    job.attemptController = null;
+    delete job.pendingSwitch;
     job.controller = null;
     delete job.waitController;
     delete job.nextAttemptAt;
@@ -227,6 +301,10 @@ export class Jobs {
       waitController,
       testNode,
       nativeNode,
+      previewNode,
+      testSettings,
+      attemptController,
+      pendingSwitch,
       ...safe
     } = j;
     return structuredClone({
@@ -255,6 +333,27 @@ export class Jobs {
         : "client_aborted";
       j.controller?.abort(abortError());
     }
+    return this.get(id);
+  }
+  switchNode(id, nodeId) {
+    const job = this.jobs.get(id);
+    if (
+      !job ||
+      terminal.has(job.state) ||
+      job.testNode ||
+      job.controller?.signal.aborted
+    )
+      throw new Error("当前任务不能切换节点");
+    if (!job.availableNodes?.some((n) => n.id === nodeId))
+      throw new Error("请选择本轮可用节点");
+    if (job.pendingSwitch) throw new Error("正在切换，请稍后");
+    job.manualSwitches.push({ nodeId, at: Date.now(), round: job.round });
+    job.manualSwitches.splice(0, Math.max(0, job.manualSwitches.length - 100));
+    job.pendingSwitch = nodeId;
+    delete job.nextAttemptAt;
+    job.attemptController?.abort(abortError());
+    job.waitController?.abort();
+    this.persist();
     return this.get(id);
   }
   acknowledge(id) {

@@ -46,6 +46,7 @@ export const abortError = () => new DOMException("Cancelled", "AbortError");
 export const CANCEL_REASONS = Object.freeze({
   user_cancel: "在请求记录中停止任务",
   user_stop: "酒馆停止了生成",
+  panel_stop: "用户在悬浮窗停止了生成",
   chat_changed: "切换聊天，已取消旧聊天请求",
   page_closed: "页面刷新或关闭，已取消请求",
   plugin_disabled: "故障转移已停用",

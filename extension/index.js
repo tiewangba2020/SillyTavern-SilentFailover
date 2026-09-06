@@ -1,5 +1,6 @@
 import { API, ENDPOINT, installAdapter } from "./adapter.js";
 import { VERSION } from "../server/version.js";
+import { createTaskPanel } from "./panel.js";
 const ctx = () => SillyTavern.getContext();
 const STATES = {
   running: "尝试中",
@@ -11,6 +12,11 @@ const STATES = {
   invalid: "未执行",
 };
 let bridge, root, config, refreshTimer, snapshot;
+let savedConfig,
+  dirty = false,
+  editorRead,
+  panel;
+const testControllers = new Set();
 const localRecords = [];
 const browserEvents = [];
 const recordEvent = (stage) => {
@@ -56,8 +62,8 @@ function selected() {
 function nativeSelected() {
   const c = ctx();
   return (
-    config?.enabled &&
-    config?.nativeFirst &&
+    savedConfig?.enabled &&
+    savedConfig?.nativeFirst &&
     c.mainApi === "openai" &&
     ["custom", "openai", "claude", "makersuite"].includes(
       c.chatCompletionSettings.chat_completion_source,
@@ -65,29 +71,8 @@ function nativeSelected() {
     !selected()
   );
 }
-async function setNativeFirst(value) {
-  if (value) {
-    if (!config.nativeAvailable)
-      throw new Error("服务端不支持原生联动，请更新并重启酒馆");
-    if (selected()) await restore();
-    const c = ctx();
-    if (
-      c.mainApi !== "openai" ||
-      !["custom", "openai", "claude", "makersuite"].includes(
-        c.chatCompletionSettings.chat_completion_source,
-      ) ||
-      selected()
-    )
-      throw new Error(
-        "请先选择 Custom、OpenAI、Claude 或 Google AI Studio 连接",
-      );
-  }
-  bridge.cancel("connection_changed");
-  await saveConfig({ nativeFirst: value, ...(value ? { enabled: true } : {}) });
-  document.getElementById("api_button_openai")?.click();
-  message(value ? "已联动原生连接" : "已关闭原生连接联动");
-}
 async function connect() {
+  if (dirty) throw new Error("请先保存设置或撤销修改");
   bridge.cancel("connection_changed");
   const c = ctx();
   const settings = c.chatCompletionSettings;
@@ -120,6 +105,7 @@ async function connect() {
   config.enabled = true;
   config.nativeFirst = false;
   config = await bridge.api("/config", config);
+  savedConfig = structuredClone(config);
   await c.executeSlashCommandsWithOptions("/api quiet=true custom");
   for (const [id, value] of [
     ["custom_api_url_text", ENDPOINT],
@@ -242,39 +228,98 @@ function editor(
   const save = el(
     "button",
     { type: "submit", className: "menu_button" },
-    "保存节点",
+    "应用节点",
   );
   actions.append(
     save,
-    button("xmark", "取消编辑", () => area.replaceChildren()),
+    button("xmark", "取消编辑", () => {
+      area.replaceChildren();
+      editorRead = null;
+    }),
   );
   form.append(actions);
+  const read = () => {
+    const data = new FormData(form);
+    return {
+      ...node,
+      id: node.id || crypto.randomUUID(),
+      name: data.get("name"),
+      url: data.get("url"),
+      model: data.get("model"),
+      protocol: data.get("protocol"),
+      key: data.get("key"),
+      priority: Number(data.get("priority")),
+      maxTokens:
+        data.get("maxTokens") === "" ? null : Number(data.get("maxTokens")),
+      stream: streamInput.checked,
+    };
+  };
+  const stage = () => {
+    if (!form.reportValidity()) throw new Error("请填写有效的节点设置");
+    const updated = read();
+    const i = config.nodes.findIndex((n) => n.id === node.id);
+    if (i >= 0) config.nodes[i] = updated;
+    else config.nodes.push(updated);
+    editorRead = null;
+    area.replaceChildren();
+    dirty = true;
+  };
+  editorRead = stage;
+  form.addEventListener("input", () => {
+    dirty = true;
+    markDirty();
+  });
+  const models = el("datalist", { id: "sf-model-options" });
+  form.querySelector('[name="model"]').setAttribute("list", models.id);
+  form.append(models);
+  const modelStatus = el("p", { className: "sf-muted", role: "status" });
+  const modelButton = button(
+    "list",
+    "获取模型列表",
+    () =>
+      void guarded(async () => {
+        modelButton.disabled = true;
+        models.replaceChildren();
+        modelStatus.textContent = "正在获取模型…";
+        try {
+          const result = await bridge.api("/models", { node: read() });
+          models.replaceChildren(
+            ...result.models.map((id) => el("option", { value: id })),
+          );
+          modelStatus.textContent = `已获取 ${result.models.length} 个模型${result.truncated ? "（列表已截断）" : ""}`;
+        } catch (e) {
+          modelStatus.textContent = e.message;
+        } finally {
+          modelButton.disabled = false;
+        }
+      }),
+  );
+  for (const input of [
+    protocol,
+    form.querySelector('[name="url"]'),
+    form.querySelector('[name="key"]'),
+  ])
+    input.addEventListener("input", () => {
+      models.replaceChildren();
+      modelStatus.textContent = "";
+    });
+  actions.append(
+    modelButton,
+    button(
+      "flask",
+      "测试当前节点（发送一次 API 请求）",
+      () => void runNodeTest(read()),
+    ),
+  );
+  form.append(modelStatus);
   form.onsubmit = (e) => {
     e.preventDefault();
     void guarded(async () => {
       save.disabled = true;
       try {
-        const data = new FormData(form);
-        const updated = {
-          ...node,
-          name: data.get("name"),
-          url: data.get("url"),
-          model: data.get("model"),
-          protocol: data.get("protocol"),
-          key: data.get("key"),
-          priority: Number(data.get("priority")),
-          maxTokens:
-            data.get("maxTokens") === "" ? null : Number(data.get("maxTokens")),
-          stream: streamInput.checked,
-        };
-        const nodes = [...config.nodes];
-        const i = nodes.findIndex((n) => n.id === node.id);
-        if (i >= 0) nodes[i] = updated;
-        else nodes.push(updated);
-        config = await bridge.api("/config", { ...config, nodes });
-        area.replaceChildren();
+        stage();
         render();
-        message("节点已保存");
+        markDirty();
       } finally {
         save.disabled = false;
       }
@@ -284,9 +329,108 @@ function editor(
   form.querySelector("input").focus();
 }
 async function saveConfig(changes) {
-  const updated = await bridge.api("/config", { ...config, ...changes });
-  config = { ...config, ...updated };
+  config = { ...config, ...changes };
+  dirty = true;
   render();
+  markDirty();
+}
+function markDirty() {
+  root.querySelector("[data-dirty]").textContent = dirty
+    ? "有未保存的修改"
+    : "已保存";
+}
+async function commitSettings() {
+  for (const input of root.querySelectorAll(
+    '[data-controls] input[type="number"], [data-advanced] input[type="number"]',
+  )) {
+    if (!input.disabled && (!input.value || !input.reportValidity()))
+      throw new Error("请填写范围内的数值设置");
+  }
+  editorRead?.();
+  const enabledNative = config.nativeFirst && !savedConfig.nativeFirst;
+  if (enabledNative && selected()) await restore();
+  if (
+    enabledNative &&
+    (ctx().mainApi !== "openai" ||
+      !["custom", "openai", "claude", "makersuite"].includes(
+        ctx().chatCompletionSettings.chat_completion_source,
+      ) ||
+      selected())
+  )
+    throw new Error("请先选择支持联动的原生 API 连接");
+  const content = root.querySelector(".inline-drawer-content");
+  content.inert = true;
+  let updated;
+  try {
+    updated = await bridge.api("/config", config);
+  } finally {
+    content.inert = false;
+  }
+  config = updated;
+  savedConfig = structuredClone(updated);
+  dirty = false;
+  render();
+  markDirty();
+  message("设置已保存");
+}
+async function runNodeTest(node) {
+  const area = root.querySelector("[data-test]");
+  if (testControllers.size) {
+    message("已有连通性测试正在进行，请先停止");
+    return;
+  }
+  const id = crypto.randomUUID(),
+    controller = new AbortController();
+  testControllers.add(controller);
+  const started = Date.now();
+  area.replaceChildren();
+  const status = el("p", { role: "status" });
+  const output = el("pre");
+  const stop = button("stop", "停止测试", () => controller.abort());
+  area.append(
+    el("strong", {}, `连通性测试 · ${node.name || "当前节点"}`),
+    status,
+    stop,
+    output,
+  );
+  area.scrollIntoView({ block: "nearest" });
+  const tick = () => {
+    status.textContent = `测试中 · 已等待 ${Math.floor((Date.now() - started) / 1000)} 秒`;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  try {
+    let job = await bridge.api(
+      "/test",
+      { id, node, settings: config },
+      controller.signal,
+    );
+    while (["running", "waiting"].includes(job.state)) {
+      await new Promise((r) => setTimeout(r, 500));
+      job = await bridge.api("/jobs/" + id, undefined, controller.signal);
+    }
+    clearInterval(timer);
+    status.textContent = `${job.state === "succeeded" ? "测试成功" : job.state === "cancelled" ? "测试已停止" : "测试失败"} · ${((Date.now() - started) / 1000).toFixed(1)} 秒 · ${node.model}`;
+    output.textContent =
+      job.state === "succeeded"
+        ? (
+            job.result?.choices?.[0]?.message?.content || "无正文，查看结束原因"
+          ).slice(0, 500)
+        : job.attempts?.at(-1)?.message || job.reason || "未取得回复";
+    if (job.state === "succeeded") await bridge.api("/jobs/" + id + "/ack", {});
+  } catch (e) {
+    clearInterval(timer);
+    status.textContent = controller.signal.aborted ? "测试已停止" : "测试失败";
+    output.textContent = controller.signal.aborted ? "" : e.message;
+    await bridge
+      .api("/jobs/" + id + "/cancel", { reason: "user_cancel" })
+      .catch(() => {});
+  } finally {
+    clearInterval(timer);
+    stop.disabled = true;
+    testControllers.delete(controller);
+    await refreshRecords();
+  }
 }
 function renderNative() {
   const area = root.querySelector("[data-native]");
@@ -360,13 +504,7 @@ function render() {
   });
   nativeInput.setAttribute("aria-label", "原生连接优先");
   nativeInput.onchange = () =>
-    void guarded(async () => {
-      try {
-        await setNativeFirst(nativeInput.checked);
-      } finally {
-        render();
-      }
-    });
+    void guarded(() => saveConfig({ nativeFirst: nativeInput.checked }));
   native.append(nativeInput, document.createTextNode("原生连接优先"));
   controls.append(native);
   renderNative();
@@ -377,9 +515,64 @@ function render() {
     "number",
     { min: 1, max: 3600 },
   );
-  interval.querySelector("input").onchange = (e) =>
-    void guarded(() => saveConfig({ intervalSeconds: Number(e.target.value) }));
+  interval.querySelector("input").oninput = (e) => {
+    config.intervalSeconds = Number(e.target.value);
+    dirty = true;
+    markDirty();
+  };
   controls.append(interval);
+  const rounds = labelInput(
+    "总轮次上限（0 不限）",
+    "maxRounds",
+    config.maxRounds ?? 0,
+    "number",
+    { min: 0, max: 10000, step: 1 },
+  );
+  rounds.querySelector("input").oninput = (e) => {
+    config.maxRounds = Number(e.target.value);
+    dirty = true;
+    markDirty();
+  };
+  controls.append(rounds);
+  for (const [key, title, options] of [
+    [
+      "notificationMode",
+      "提示方式",
+      [
+        ["silent", "完全静默"],
+        ["failure", "仅最终失败提示"],
+        ["progress", "显示切换过程"],
+      ],
+    ],
+    [
+      "waitMode",
+      "等待策略",
+      [
+        ["patient", "耐心等待"],
+        ["limited", "限时切换"],
+      ],
+    ],
+  ]) {
+    const label = el("label", { className: "sf-field" });
+    const select = el("select", { className: "text_pole", name: key });
+    select.setAttribute("aria-label", title);
+    label.append(el("span", {}, title), select);
+    for (const [value, text] of options)
+      select.append(
+        el("option", { value, selected: config[key] === value }, text),
+      );
+    select.onchange = () => void saveConfig({ [key]: select.value });
+    controls.append(label);
+  }
+  const floatLabel = el("label", { className: "sf-check" });
+  const floatInput = el("input", {
+    type: "checkbox",
+    checked: config.floatingWindow,
+  });
+  floatInput.onchange = () =>
+    void saveConfig({ floatingWindow: floatInput.checked });
+  floatLabel.append(floatInput, document.createTextNode("显示悬浮窗"));
+  controls.append(floatLabel);
   const nodes = root.querySelector("[data-nodes]");
   nodes.replaceChildren();
   if (!config.nodes.length)
@@ -425,22 +618,7 @@ function render() {
     const test = button(
       "flask",
       "测试 " + n.name + "（发送一次 API 请求）",
-      () =>
-        void guarded(async () => {
-          test.disabled = true;
-          try {
-            const job = await bridge.api("/test", { nodeId: n.id });
-            await refreshRecords();
-            let j = job;
-            while (["running", "waiting"].includes(j.state)) {
-              await new Promise((r) => setTimeout(r, 600));
-              j = await bridge.api("/jobs/" + j.id);
-            }
-            await refreshRecords();
-          } finally {
-            test.disabled = false;
-          }
-        }),
+      () => void runNodeTest(n),
     );
     actions.append(
       up,
@@ -466,12 +644,13 @@ function render() {
   const advanced = root.querySelector("[data-advanced]");
   advanced.replaceChildren();
   for (const [key, label, min, max] of [
-    ["timeoutSeconds", "单节点总超时（秒）", 1, 3600],
-    ["headerSeconds", "响应头超时（秒）", 1, 600],
-    ["firstTokenSeconds", "首数据超时（秒）", 1, 600],
-    ["idleSeconds", "数据间隔超时（秒）", 1, 600],
+    ["timeoutSeconds", "单节点总超时（秒，0 关闭）", 0, 86400],
+    ["headerSeconds", "响应头超时（秒，0 关闭）", 0, 86400],
+    ["firstTokenSeconds", "首数据超时（秒，0 关闭）", 0, 86400],
+    ["idleSeconds", "数据间隔超时（秒，0 关闭）", 0, 86400],
   ]) {
     const field = labelInput(label, key, config[key], "number", { min, max });
+    field.querySelector("input").disabled = config.waitMode === "patient";
     field.querySelector("input").onchange = (e) =>
       void guarded(async () => {
         if (!e.target.value || !e.target.checkValidity()) {
@@ -483,6 +662,7 @@ function render() {
       });
     advanced.append(field);
   }
+  markDirty();
 }
 async function refreshRecords() {
   if (!root?.isConnected) return;
@@ -556,7 +736,7 @@ async function refreshRecords() {
       detail.append(
         button(
           "stop",
-          "停止此任务",
+          "停止生成",
           () =>
             void guarded(async () => {
               await bridge.api("/jobs/" + r.id + "/cancel", {
@@ -741,6 +921,23 @@ async function boot() {
   root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>静默 API 故障转移</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><div class="sf-actions" data-actions></div><p class="sf-muted" data-status></p><div class="sf-controls" data-controls></div><div data-editor></div><div data-native></div><div data-nodes></div><details><summary>超时设置</summary><div class="sf-fields" data-advanced></div></details><details data-history><summary>请求记录</summary><div class="sf-actions" data-log-actions></div><div data-records></div></details></div></div>`;
   document.getElementById("extensions_settings2").append(root);
   const actions = root.querySelector("[data-actions]");
+  const dirtyStatus = el("p", { className: "sf-muted", role: "status" });
+  dirtyStatus.dataset.dirty = "";
+  actions.after(dirtyStatus);
+  const testArea = el("div", { className: "sf-test-result" });
+  testArea.dataset.test = "";
+  root.querySelector("[data-editor]").after(testArea);
+  panel = createTaskPanel(bridge.api, () => {
+    root.querySelector(".inline-drawer-content").style.display = "block";
+    root.querySelector("[data-history]").open = true;
+    const drawer = root.closest(".drawer-content");
+    if (!drawer || getComputedStyle(drawer).display === "none")
+      document
+        .getElementById("extensions-settings-button")
+        ?.querySelector(".drawer-toggle")
+        ?.click();
+    void refreshRecords();
+  });
   const connectButton = el(
     "button",
     { type: "button", className: "menu_button" },
@@ -758,11 +955,46 @@ async function boot() {
       "刷新配置",
       () =>
         void guarded(async () => {
+          if (dirty) throw new Error("有未保存的修改，请先保存或撤销");
           config = await bridge.api("/config");
+          savedConfig = structuredClone(config);
           render();
           message("服务端已连接");
         }),
     ),
+  );
+  const saveButton = button(
+    "floppy-disk",
+    "保存设置",
+    () =>
+      void guarded(async () => {
+        if (saveButton.disabled) return;
+        saveButton.disabled = true;
+        try {
+          await commitSettings();
+        } finally {
+          saveButton.disabled = false;
+        }
+      }),
+  );
+  saveButton.append(document.createTextNode(" 保存设置"));
+  saveButton.classList.remove("sf-icon");
+  actions.append(
+    saveButton,
+    button("rotate-left", "撤销修改", () => {
+      config = structuredClone(savedConfig);
+      dirty = false;
+      editorRead = null;
+      root.querySelector("[data-editor]").replaceChildren();
+      render();
+      message("已撤销未保存的修改");
+    }),
+    button("window-restore", "显示任务悬浮窗", () => {
+      if (!config) return;
+      void saveConfig({ floatingWindow: true });
+      panel.update(config, []);
+      panel.show();
+    }),
   );
   const update = button(
     "download",
@@ -803,20 +1035,36 @@ async function boot() {
     bridge.cancel("chat_changed");
     snapshot = null;
   });
-  const unload = () => bridge.cancel("page_closed");
+  const unload = () => {
+    bridge.cancel("page_closed");
+    for (const c of testControllers) c.abort();
+  };
   window.addEventListener("pagehide", unload);
   subscriptions.push(["pagehide", unload]);
   refreshTimer = setInterval(() => {
     renderNative();
-    if (root.querySelector("[data-history]").open && !document.hidden)
-      void refreshRecords();
-  }, 2500);
+    if (!document.hidden) {
+      if (root.querySelector("[data-history]").open) void refreshRecords();
+      if (config)
+        void bridge
+          .api("/records")
+          .then((records) =>
+            panel.update(
+              { ...savedConfig, floatingWindow: config.floatingWindow },
+              records,
+            ),
+          )
+          .catch(() => {});
+    }
+  }, 1000);
   await guarded(async () => {
     config = await bridge.api("/config");
+    savedConfig = structuredClone(config);
     render();
     message(
       `前端 ${VERSION} · 服务端 ${config.version || "未知"}${config.version !== VERSION ? " · 请同步升级两部分" : " · 已连接"}`,
     );
+    panel.update(config, await bridge.api("/records"));
     root.querySelector("[data-update]").disabled = config.canUpdate === false;
     if (config.updateSupported) {
       const state = await bridge.api("/update/status");
@@ -829,10 +1077,14 @@ async function boot() {
   });
 }
 export async function onDisable() {
-  if (bridge && config)
-    await bridge.api("/config", { ...config, enabled: false }).catch(() => {});
+  if (bridge && savedConfig)
+    await bridge
+      .api("/config", { ...savedConfig, enabled: false })
+      .catch(() => {});
   if (selected()) await restore().catch(() => {});
   bridge?.dispose();
+  for (const c of testControllers) c.abort();
+  panel?.dispose();
   clearInterval(refreshTimer);
   for (const [event, fn] of subscriptions.splice(0)) {
     if (event === "pagehide") window.removeEventListener(event, fn);

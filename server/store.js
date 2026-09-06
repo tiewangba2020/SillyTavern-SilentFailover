@@ -5,6 +5,10 @@ export const DEFAULTS = Object.freeze({
   enabled: false,
   nativeFirst: false,
   loop: false,
+  maxRounds: 0,
+  notificationMode: "silent",
+  floatingWindow: false,
+  waitMode: "patient",
   intervalSeconds: 5,
   timeoutSeconds: 180,
   idleSeconds: 45,
@@ -53,7 +57,20 @@ export class Store {
   keys() {
     return this.config.nodes.map((n) => n.key).filter(Boolean);
   }
-  save(input) {
+  previewNode(input, requireModel = true) {
+    if (!input || typeof input !== "object") throw new Error("节点无效");
+    return this.validate({
+      ...this.publicConfig(),
+      nodes: [
+        {
+          ...input,
+          name: input.name || "测试节点",
+          model: requireModel ? input.model : "model-list",
+        },
+      ],
+    }).nodes[0];
+  }
+  validate(input) {
     if (!input || !Array.isArray(input.nodes) || input.nodes.length > 100)
       throw new Error("节点列表无效（最多 100 个）");
     const old = new Map(this.config.nodes.map((n) => [n.id, n]));
@@ -115,18 +132,32 @@ export class Store {
       enabled: input.enabled === true,
       nativeFirst: input.nativeFirst === true,
       loop: input.loop === true,
+      maxRounds: number(input.maxRounds ?? 0, 0, 10000, "总轮次上限"),
+      notificationMode: input.notificationMode ?? "silent",
+      floatingWindow: input.floatingWindow === true,
+      waitMode: input.waitMode ?? "patient",
       intervalSeconds: number(input.intervalSeconds ?? 5, 1, 3600, "轮次间隔"),
-      timeoutSeconds: number(input.timeoutSeconds ?? 180, 1, 3600, "总超时"),
-      idleSeconds: number(input.idleSeconds ?? 45, 1, 600, "数据间隔超时"),
+      timeoutSeconds: number(input.timeoutSeconds ?? 180, 0, 86400, "总超时"),
+      idleSeconds: number(input.idleSeconds ?? 45, 0, 86400, "数据间隔超时"),
       firstTokenSeconds: number(
         input.firstTokenSeconds ?? 90,
-        1,
-        600,
+        0,
+        86400,
         "首数据超时",
       ),
-      headerSeconds: number(input.headerSeconds ?? 30, 1, 600, "响应头超时"),
+      headerSeconds: number(input.headerSeconds ?? 30, 0, 86400, "响应头超时"),
       nodes,
     };
+    if (!Number.isInteger(config.maxRounds))
+      throw new Error("总轮次上限必须为整数");
+    if (!["silent", "failure", "progress"].includes(config.notificationMode))
+      throw new Error("提示方式无效");
+    if (!["patient", "limited"].includes(config.waitMode))
+      throw new Error("等待策略无效");
+    return config;
+  }
+  save(input) {
+    const config = this.validate(input);
     atomicJson(this.file, config);
     this.config = config;
     for (const fn of this.listeners) fn();

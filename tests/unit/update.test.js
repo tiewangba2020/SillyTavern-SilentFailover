@@ -80,7 +80,7 @@ function fixture(options = {}) {
     );
     return bundle();
   };
-  const updater = new Updater({ root, serverDir, download, ...options });
+  const updater = new Updater({ root, serverDir, download, runningVersion: "1.2.0", ...options });
   return { updater, root, serverDir, frontend };
 }
 test("validates versions, complete file allowlist, integrity and paired manifests", () => {

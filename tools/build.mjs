@@ -68,7 +68,7 @@ for (const name of [
     fs.unlinkSync(path.join("release", name));
 for (const dest of [ext, server, "release"])
   fs.copyFileSync("LICENSE", dest + "/LICENSE");
-const notices = ["eventsource-parser", "yaml"]
+const notices = ["eventsource-parser", "yaml", "undici"]
   .map(
     (name) =>
       name +
@@ -78,6 +78,8 @@ const notices = ["eventsource-parser", "yaml"]
   .join("\n\n");
 for (const dest of [server, "release"])
   fs.writeFileSync(dest + "/THIRD_PARTY_NOTICES.txt", notices);
+// One-click updates replace only runtime files; keep dependency licenses in that bundle too.
+fs.appendFileSync(server + "/index.cjs", "\n/* Third-party notices\n" + notices.replace(/\*\//g, "* /") + "\n*/\n");
 console.log("Built frontend extension and self-contained server plugin.");
 const update = {
   schema: 1,

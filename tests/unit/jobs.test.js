@@ -51,6 +51,31 @@ async function finish(jobs, id) {
   throw new Error("job did not finish");
 }
 describe("sequential jobs", () => {
+  test("round cap three executes exactly ABCABCABC", async () => {
+    const order = [];
+    const { jobs, store } = fixture(async n => { order.push(n.name); throw new Error("unavailable"); });
+    store.save({ ...store.publicConfig(), loop: true, maxRounds: 3 });
+    const done = await finish(jobs, jobs.create("round-cap", request).id);
+    expect(order.join("")).toBe("ABCABCABC");
+    expect(done.state).toBe("exhausted");
+    expect(done.round).toBe(3);
+  });
+  test("manual switch aborts only the current attempt and never delivers its partial reply", async () => {
+    const order = [];
+    const { jobs, store } = fixture(async (n, p, signal) => {
+      order.push(n.name);
+      if (n.name === "A") await new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      return ok;
+    });
+    const task = jobs.create("manual-switch", request);
+    jobs.switchNode(task.id, store.config.nodes[2].id);
+    const done = await finish(jobs, task.id);
+    expect(order).toEqual(["A", "C"]);
+    expect(done.state).toBe("succeeded");
+    expect(done.attempts[0].cancelReason).toBe("manual_switch");
+    expect(done.result).toEqual(ok);
+    expect(JSON.stringify(jobs.list())).not.toContain("secret-");
+  });
   test("335 recovery rounds keep only 1000 attempt details and bounded persisted logs", async () => {
     let calls = 0;
     const { jobs, store } = fixture(async () => {

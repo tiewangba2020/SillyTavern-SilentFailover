@@ -4,6 +4,7 @@ export async function mockProvider(port=0) {
   const server=http.createServer(async(req,res)=>{
     if(req.url==='/control') {let body='';for await(const chunk of req)body+=chunk;mode=JSON.parse(body).mode;calls.length=0;res.end('{}');return;}
     if(req.url==='/calls'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({calls,active}));return;}
+    if(req.method==='GET' && req.url.endsWith('/models')) {res.setHeader('Content-Type','application/json');res.end(JSON.stringify({data:[{id:'mock-C'},{id:'mock-extra'}]}));return;}
     let body='';for await(const chunk of req)body+=chunk;
     const node=req.url.split('/')[1];calls.push({node,body:JSON.parse(body),authorization:req.headers.authorization});active++;res.on('close',()=>active--);
     if(mode==='parameters') {
@@ -14,7 +15,7 @@ export async function mockProvider(port=0) {
       }
     }
     const fail=()=>{res.writeHead(node==='A'?401:503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:node==='A'?'Invalid API key test-only-A':'Provider unavailable',code:node==='A'?'invalid_api_key':'unavailable'}}));};
-    if(mode==='slow'){const t=setTimeout(fail,120000);res.on('close',()=>clearTimeout(t));return;}
+    if(mode==='slow'||mode==='manual'&&node==='A'){const t=setTimeout(fail,120000);res.on('close',()=>clearTimeout(t));return;}
     if(mode==='all-fail'||node==='A'||mode==='loop'&&calls.length<5){fail();return;}
     if(mode==='fallback'&&node==='B'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.end('data: {"choices":[{"delta":{"content":"DO NOT DISPLAY PARTIAL"}}]}\n\n');return;}
     if(mode==='embedded'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({error:{message:'embedded failure'}}));return;}

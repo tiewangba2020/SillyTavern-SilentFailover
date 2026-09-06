@@ -91,6 +91,7 @@ test("enforces total timeout", async () => {
     attempt(node("C"), payload, new AbortController().signal, {
       ...DEFAULTS,
       timeoutSeconds: 0.03,
+      waitMode: "limited",
     }),
   ).rejects.toMatchObject({ category: "timeout" });
 });
@@ -155,4 +156,17 @@ test("records zero text for content filtering without retrying a refusal", async
   } finally {
     vi.unstubAllGlobals();
   }
+});
+
+test("patient waiting accepts delayed content beyond all configured cutoffs", async () => {
+  vi.stubGlobal("fetch", async (url, options) => {
+    expect(options.dispatcher).toBeDefined();
+    await new Promise(r => setTimeout(r, 70));
+    expect(options.signal.aborted).toBe(false);
+    return Response.json({ choices: [{ message: { content: "late complete" }, finish_reason: "stop" }] });
+  });
+  try {
+    const result = await attempt(node("C", false), payload, new AbortController().signal, { ...DEFAULTS, waitMode: "patient", timeoutSeconds: .01, headerSeconds: .01, firstTokenSeconds: .01, idleSeconds: .01 });
+    expect(result.choices[0].message.content).toBe("late complete");
+  } finally { vi.unstubAllGlobals(); }
 });

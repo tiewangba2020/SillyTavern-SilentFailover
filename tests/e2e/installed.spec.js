@@ -40,6 +40,10 @@ async function setup(page, mode = "fallback", loop = false) {
   await api(page, "/config", {
     ...current,
     enabled: true,
+    maxRounds: 0,
+    notificationMode: "silent",
+    floatingWindow: false,
+    waitMode: "patient",
     loop,
     intervalSeconds: 1,
     nodes: ["A", "B", "C"].map((name, i) => ({
@@ -152,7 +156,7 @@ test("installed extension can add/edit/reorder nodes and persists on reload", as
     .getByLabel("API 地址", { exact: true })
     .fill("http://127.0.0.1:9107/C/v1");
   await root.getByLabel("API Key", { exact: true }).fill("test-secret-ui");
-  await root.getByRole("button", { name: "保存节点", exact: true }).click();
+  await root.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect(root.locator(".sf-node")).toHaveCount(1);
   expect(JSON.stringify(await api(page, "/config"))).not.toContain(
     "test-secret-ui",
@@ -410,7 +414,7 @@ test("changing chat cancels the current task without writing to the new chat", a
   await expect(page.locator("#chat")).not.toContainText("完整回复验证通过");
   await expect(page.locator("#toast-container .toast-error")).toHaveCount(0);
 });
-test("UI edits and priority changes persist; loop switch is immediate", async ({
+test("UI edits and priority changes persist only after explicit save", async ({
   page,
 }) => {
   const root = await open(page);
@@ -437,7 +441,7 @@ test("UI edits and priority changes persist; loop switch is immediate", async ({
   await root.getByRole("button", { name: "刷新配置", exact: true }).click();
   await root.getByRole("button", { name: "编辑 One", exact: true }).click();
   await root.getByLabel("模型 ID", { exact: true }).fill("new-model");
-  await root.getByRole("button", { name: "保存节点", exact: true }).click();
+  await root.getByRole("button", { name: "应用节点", exact: true }).click();
   await expect(root.locator(".sf-node").first()).toContainText("new-model");
   expect((await api(page, "/config")).nodes[0].keySet).toBe(true);
   await root.getByRole("button", { name: "上移 Two", exact: true }).click();
@@ -445,5 +449,82 @@ test("UI edits and priority changes persist; loop switch is immediate", async ({
   await root
     .getByRole("checkbox", { name: "自动循环重试", exact: true })
     .check();
+  await root.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect.poll(async () => (await api(page, "/config")).loop).toBe(true);
+});
+
+test("draft model lookup and connectivity test work before saving and can be cancelled", async ({ page }) => {
+  await page.request.post("http://127.0.0.1:9107/control", { data: { mode: "success" } });
+  const root = await open(page);
+  const before = await api(page, "/config");
+  await root.getByRole("button", { name: "新增节点", exact: true }).click();
+  await root.getByLabel("名称", { exact: true }).fill("Draft test");
+  await root.getByLabel("API 地址", { exact: true }).fill("http://127.0.0.1:9107/C/v1");
+  await root.getByRole("button", { name: "获取模型列表", exact: true }).click();
+  await expect(root.locator("#sf-model-options option")).toHaveCount(2);
+  await root.getByLabel("模型 ID", { exact: true }).fill("mock-C");
+  await root.getByRole("button", { name: "测试当前节点（发送一次 API 请求）", exact: true }).click();
+  await expect(root.locator("[data-test]")).toContainText("测试成功");
+  expect((await api(page, "/config")).nodes).toEqual(before.nodes);
+  await page.request.post("http://127.0.0.1:9107/control", { data: { mode: "slow" } });
+  await root.getByRole("button", { name: "测试当前节点（发送一次 API 请求）", exact: true }).click();
+  await expect(root.locator("[data-test]")).toContainText("测试中");
+  await root.getByRole("button", { name: "停止测试", exact: true }).click();
+  await expect(root.locator("[data-test]")).toContainText("测试已停止");
+  await root.getByRole("button", { name: "撤销修改", exact: true }).click();
+  await expect(root.locator("[data-dirty]")).toHaveText("已保存");
+});
+
+test("floating panel switches an active API, stops generation and fits mobile", async ({ page }) => {
+  await setup(page, "manual", true);
+  let c = await api(page, "/config");
+  await api(page, "/config", { ...c, floatingWindow: true });
+  await page.locator("#extensions-settings-button .drawer-toggle").click();
+  await page.getByRole("button", { name: "刷新配置", exact: true }).click();
+  await page.locator("#extensions-settings-button .drawer-toggle").click();
+  await page.locator("#send_textarea").fill("手动切换完整回复验证");
+  await page.locator("#send_but").click();
+  await expect.poll(async () => (await api(page, "/records"))[0]?.state).toBe("running");
+  const job = (await api(page, "/records"))[0];
+  const panel = page.locator(".sf-task-panel");
+  await expect(panel).toBeVisible();
+  await expect(panel.locator(".sf-panel-node")).toHaveText("A");
+  await panel.getByLabel("切换到 API", { exact: true }).selectOption(c.nodes.find(n => n.name === "C").id);
+  await panel.getByRole("button", { name: "切换 API", exact: true }).click();
+  await expect.poll(async () => (await api(page, "/jobs/" + job.id)).state).toBe("succeeded");
+  await expect(panel.locator(".sf-panel-node")).toHaveText("C");
+  await expect(page.locator("#chat .mes").last()).toContainText("完整回复验证通过");
+  await page.screenshot({ path: "artifacts/floating-desktop.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: "artifacts/floating-mobile.png" });
+  expect(await panel.evaluate(e => e.scrollWidth <= e.clientWidth + 1)).toBe(true);
+  const bounds = await panel.boundingBox();
+  expect(bounds.y).toBeGreaterThanOrEqual(0);
+  expect(bounds.y + bounds.height).toBeLessThanOrEqual(844);
+  await panel.getByRole("button", { name: "收起悬浮窗" }).click();
+  await expect(panel.locator(".sf-panel-body")).toBeHidden();
+  await panel.getByRole("button", { name: "展开悬浮窗" }).click();
+  const next = await api(page, "/jobs", { id: crypto.randomUUID(), request: { messages: [{ role: "user", content: "stop task" }] } });
+  await expect(panel.getByRole("button", { name: "停止生成" })).toBeEnabled();
+  await panel.getByRole("button", { name: "停止生成" }).click();
+  await expect.poll(async () => (await api(page, "/jobs/" + next.id)).state).toBe("cancelled");
+});
+
+test("saved round limit ends retries and final-failure mode shows one notice", async ({ page }) => {
+  await setup(page, "all-fail", true);
+  await page.locator("#extensions-settings-button .drawer-toggle").click();
+  const root = page.locator("#silent-failover-settings");
+  await root.getByLabel("总轮次上限（0 不限）").fill("2");
+  await root.getByLabel("提示方式", { exact: true }).selectOption("failure");
+  await root.getByRole("button", { name: "保存设置", exact: true }).click();
+  const job = await api(page, "/jobs", { id: crypto.randomUUID(), request: { messages: [{ role: "user", content: "round test" }] } });
+  await expect.poll(async () => (await api(page, "/jobs/" + job.id)).state).toBe("exhausted");
+  expect((await api(page, "/jobs/" + job.id)).attemptCount).toBe(6);
+  await expect(page.locator(".sf-task-notice")).toBeVisible();
+  await expect(page.locator(".sf-task-notice")).toContainText("本次生成未成功");
+  await root.getByLabel("提示方式", { exact: true }).selectOption("silent");
+  await root.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(page.locator(".sf-task-notice")).toBeHidden();
+  const c = await api(page, "/config");
+  await api(page, "/config", { ...c, maxRounds: 0 });
 });

@@ -260,7 +260,238 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.2.1";
+var VERSION = "1.3.0";
+
+// extension/panel.js
+var make = (tag, cls, text) => {
+  const element = document.createElement(tag);
+  element.className = cls;
+  if (text !== void 0) element.textContent = text;
+  return element;
+};
+var icon = (name, title, action) => {
+  const b = make("button", "sf-panel-icon");
+  b.type = "button";
+  b.title = title;
+  b.setAttribute("aria-label", title);
+  b.append(make("i", `fa-solid fa-${name}`));
+  b.onclick = action;
+  return b;
+};
+function createTaskPanel(api, openRecords) {
+  const panel2 = make("section", "sf-task-panel");
+  panel2.setAttribute("aria-label", "\u6545\u969C\u8F6C\u79FB\u4EFB\u52A1");
+  const header = make("header", "sf-panel-header");
+  const title = make("strong", "", "\u6545\u969C\u8F6C\u79FB");
+  header.append(make("i", "fa-solid fa-shuffle"), title);
+  const body = make("div", "sf-panel-body");
+  let hidden = false, collapsed = false, selectedId, config2, records = [], lastConfigVisible = false;
+  const collapse = icon("minus", "\u6536\u8D77\u60AC\u6D6E\u7A97", () => {
+    collapsed = !collapsed;
+    body.hidden = collapsed;
+    collapse.title = collapsed ? "\u5C55\u5F00\u60AC\u6D6E\u7A97" : "\u6536\u8D77\u60AC\u6D6E\u7A97";
+    collapse.setAttribute("aria-label", collapse.title);
+    collapse.firstChild.className = `fa-solid fa-${collapsed ? "plus" : "minus"}`;
+    clamp();
+  });
+  header.append(
+    collapse,
+    icon("xmark", "\u5173\u95ED\u60AC\u6D6E\u7A97", () => {
+      hidden = true;
+      panel2.hidden = true;
+    })
+  );
+  const tasks = make("select", "sf-panel-select");
+  tasks.setAttribute("aria-label", "\u5F53\u524D\u751F\u6210\u4EFB\u52A1");
+  tasks.onchange = () => {
+    selectedId = tasks.value;
+    render2();
+  };
+  const status = make("div", "sf-panel-state", "\u6682\u65E0\u751F\u6210\u4EFB\u52A1");
+  status.setAttribute("role", "status");
+  const node = make("strong", "sf-panel-node");
+  const model = make("div", "sf-panel-model");
+  const stats = make("div", "sf-panel-stats");
+  const choose = make("select", "sf-panel-select");
+  choose.setAttribute("aria-label", "\u5207\u6362\u5230 API");
+  const actions = make("div", "sf-panel-actions");
+  let commandBusy = false;
+  const command = async (suffix, data) => {
+    if (!selectedId || commandBusy) return;
+    commandBusy = true;
+    switchButton.disabled = stop.disabled = true;
+    try {
+      await api(`/jobs/${selectedId}/${suffix}`, data);
+      status.textContent = suffix === "switch" ? "\u6B63\u5728\u5207\u6362\u8282\u70B9" : "\u6B63\u5728\u505C\u6B62\u751F\u6210";
+    } catch (e) {
+      status.textContent = e.message;
+    } finally {
+      commandBusy = false;
+    }
+  };
+  const switchButton = icon(
+    "right-left",
+    "\u5207\u6362 API",
+    () => void command("switch", { nodeId: choose.value })
+  );
+  const stop = icon(
+    "stop",
+    "\u505C\u6B62\u751F\u6210",
+    () => void command("cancel", { reason: "panel_stop" })
+  );
+  stop.classList.add("sf-panel-stop");
+  actions.append(choose, switchButton, stop);
+  body.append(tasks, status, node, model, stats, actions);
+  panel2.append(header, body);
+  document.body.append(panel2);
+  panel2.hidden = true;
+  const notice = make("aside", "sf-task-notice");
+  const noticeText = make("button", "sf-notice-text");
+  noticeText.type = "button";
+  noticeText.onclick = openRecords;
+  notice.append(
+    noticeText,
+    icon("xmark", "\u5173\u95ED\u63D0\u793A", () => {
+      notice.hidden = true;
+    })
+  );
+  document.body.append(notice);
+  notice.hidden = true;
+  let noticeTimer, initialized = false;
+  const known = /* @__PURE__ */ new Map();
+  function notify(jobs) {
+    for (const job of jobs) {
+      const signature = `${job.state}:${job.attemptCount}`;
+      if (initialized && known.get(job.id) !== signature && job.mode !== "node_test" && job.generation !== "quiet") {
+        if (job.state === "cancelled") notice.hidden = true;
+        const failed = ["exhausted", "invalid"].includes(job.state);
+        const progress = config2.notificationMode === "progress";
+        if (config2.notificationMode !== "silent" && (failed || progress && job.state !== "cancelled")) {
+          const a = job.attempts?.at(-1);
+          const text = failed ? "\u672C\u6B21\u751F\u6210\u672A\u6210\u529F\uFF0C\u70B9\u51FB\u67E5\u770B\u8BB0\u5F55" : job.state === "succeeded" ? "\u5DF2\u53D6\u5F97\u5B8C\u6574\u56DE\u590D" : job.state === "waiting" ? `\u7B2C ${job.round} \u8F6E\u7ED3\u675F\uFF0C\u7B49\u5F85\u91CD\u8BD5` : `${a?.node || "API"} \xB7 \u7B2C ${job.round} \u8F6E\u5C1D\u8BD5\u4E2D`;
+          if (!panel2.hidden && !failed) {
+            notice.hidden = true;
+          } else {
+            noticeText.textContent = text;
+            notice.dataset.state = failed ? "failed" : job.state;
+            notice.hidden = false;
+            clearTimeout(noticeTimer);
+            if (!failed)
+              noticeTimer = setTimeout(() => {
+                notice.hidden = true;
+              }, 5e3);
+          }
+        }
+      }
+      known.set(job.id, signature);
+    }
+    for (const id of known.keys())
+      if (!jobs.some((j) => j.id === id)) known.delete(id);
+    initialized = true;
+    if (config2.notificationMode === "silent") notice.hidden = true;
+  }
+  function fill(select, entries, value) {
+    const signature = JSON.stringify(entries);
+    if (select.dataset.options !== signature) {
+      select.replaceChildren(
+        ...entries.map(([id, label]) => {
+          const option = make("option", "", label);
+          option.value = id;
+          return option;
+        })
+      );
+      select.dataset.options = signature;
+      if (entries.some((e) => e[0] === value)) select.value = value;
+    }
+  }
+  function render2() {
+    const jobs = records.filter((j) => j.mode !== "node_test");
+    const active = jobs.filter((j) => ["running", "waiting"].includes(j.state));
+    let job = active.find((j) => j.id === selectedId) || active[0] || jobs.find((j) => j.id === selectedId);
+    selectedId = job?.id;
+    fill(
+      tasks,
+      active.map((j) => [
+        j.id,
+        `${new Date(j.started).toLocaleTimeString()} \xB7 ${j.generation || "\u751F\u6210"}`
+      ]),
+      selectedId
+    );
+    tasks.hidden = active.length < 2;
+    const a = job?.attempts?.at(-1);
+    const running = !!job && ["running", "waiting"].includes(job.state);
+    panel2.dataset.state = job?.state || "idle";
+    status.textContent = !job ? "\u6682\u65E0\u751F\u6210\u4EFB\u52A1" : {
+      succeeded: "\u4E0A\u6E38\u5DF2\u5B8C\u6210",
+      cancelled: "\u5DF2\u505C\u6B62",
+      exhausted: "\u5C1D\u8BD5\u5DF2\u7ED3\u675F",
+      invalid: "\u672A\u6267\u884C",
+      waiting: "\u7B49\u5F85\u4E0B\u4E00\u8F6E"
+    }[job.state] || (a?.diagnostics?.bytes ? "\u6B63\u5728\u63A5\u6536\u4E0A\u6E38\u6570\u636E" : "\u7B49\u5F85\u4E0A\u6E38\u54CD\u5E94");
+    node.textContent = a?.node || "\u5C31\u7EEA";
+    model.textContent = a?.model || "";
+    stats.textContent = job ? `\u7B2C ${job.round}${job.maxRounds ? " / " + job.maxRounds : ""} \u8F6E  \xB7  ${Math.max(0, Math.floor(((job.ended || Date.now()) - job.started) / 1e3))} \u79D2  \xB7  ${job.attemptCount} \u6B21\u5C1D\u8BD5` : "";
+    fill(
+      choose,
+      job?.availableNodes?.map((n) => [n.id, n.name]) || [],
+      choose.value
+    );
+    choose.disabled = !running || commandBusy;
+    switchButton.disabled = !running || commandBusy || !choose.value;
+    stop.disabled = !running || commandBusy;
+    panel2.hidden = !config2?.floatingWindow || hidden;
+    clamp();
+  }
+  function clamp() {
+    if (panel2.hidden) return;
+    if (!panel2.style.left) {
+      panel2.style.right = panel2.style.bottom = "auto";
+      panel2.style.left = `${innerWidth - panel2.offsetWidth - 16}px`;
+      panel2.style.top = `${innerHeight - panel2.offsetHeight - 110}px`;
+    }
+    const box = panel2.getBoundingClientRect();
+    panel2.style.left = `${Math.max(8, Math.min(box.left, innerWidth - box.width - 8))}px`;
+    panel2.style.top = `${Math.max(8, Math.min(box.top, innerHeight - box.height - 100))}px`;
+  }
+  let drag;
+  header.onpointerdown = (e) => {
+    if (e.target.closest("button") || e.button !== 0) return;
+    const box = panel2.getBoundingClientRect();
+    drag = { x: e.clientX - box.left, y: e.clientY - box.top };
+    header.setPointerCapture(e.pointerId);
+  };
+  header.onpointermove = (e) => {
+    if (!drag) return;
+    panel2.style.right = panel2.style.bottom = "auto";
+    panel2.style.left = `${e.clientX - drag.x}px`;
+    panel2.style.top = `${e.clientY - drag.y}px`;
+    clamp();
+  };
+  header.onpointerup = header.onpointercancel = () => {
+    drag = null;
+  };
+  window.addEventListener("resize", clamp);
+  return {
+    update(nextConfig, nextRecords) {
+      config2 = nextConfig;
+      records = nextRecords;
+      if (config2.floatingWindow !== lastConfigVisible) hidden = false;
+      lastConfigVisible = config2.floatingWindow;
+      render2();
+      notify(records);
+    },
+    show() {
+      hidden = false;
+      render2();
+    },
+    dispose() {
+      clearTimeout(noticeTimer);
+      window.removeEventListener("resize", clamp);
+      panel2.remove();
+      notice.remove();
+    }
+  };
+}
 
 // extension/index.js
 var ctx = () => SillyTavern.getContext();
@@ -278,6 +509,11 @@ var root;
 var config;
 var refreshTimer;
 var snapshot;
+var savedConfig;
+var dirty = false;
+var editorRead;
+var panel;
+var testControllers = /* @__PURE__ */ new Set();
 var localRecords = [];
 var browserEvents = [];
 var recordEvent = (stage) => {
@@ -291,14 +527,14 @@ var el = (tag, props = {}, text) => {
   if (text !== void 0) e.textContent = text;
   return e;
 };
-function button(icon, label, fn) {
+function button(icon2, label, fn) {
   const b = el("button", {
     type: "button",
     className: "menu_button sf-icon",
     title: label
   });
   b.setAttribute("aria-label", label);
-  b.append(el("i", { className: `fa-solid fa-${icon}` }));
+  b.append(el("i", { className: `fa-solid fa-${icon2}` }));
   b.onclick = fn;
   return b;
 }
@@ -318,29 +554,12 @@ function selected() {
 }
 function nativeSelected() {
   const c = ctx();
-  return config?.enabled && config?.nativeFirst && c.mainApi === "openai" && ["custom", "openai", "claude", "makersuite"].includes(
+  return savedConfig?.enabled && savedConfig?.nativeFirst && c.mainApi === "openai" && ["custom", "openai", "claude", "makersuite"].includes(
     c.chatCompletionSettings.chat_completion_source
   ) && !selected();
 }
-async function setNativeFirst(value) {
-  if (value) {
-    if (!config.nativeAvailable)
-      throw new Error("\u670D\u52A1\u7AEF\u4E0D\u652F\u6301\u539F\u751F\u8054\u52A8\uFF0C\u8BF7\u66F4\u65B0\u5E76\u91CD\u542F\u9152\u9986");
-    if (selected()) await restore();
-    const c = ctx();
-    if (c.mainApi !== "openai" || !["custom", "openai", "claude", "makersuite"].includes(
-      c.chatCompletionSettings.chat_completion_source
-    ) || selected())
-      throw new Error(
-        "\u8BF7\u5148\u9009\u62E9 Custom\u3001OpenAI\u3001Claude \u6216 Google AI Studio \u8FDE\u63A5"
-      );
-  }
-  bridge.cancel("connection_changed");
-  await saveConfig({ nativeFirst: value, ...value ? { enabled: true } : {} });
-  document.getElementById("api_button_openai")?.click();
-  message(value ? "\u5DF2\u8054\u52A8\u539F\u751F\u8FDE\u63A5" : "\u5DF2\u5173\u95ED\u539F\u751F\u8FDE\u63A5\u8054\u52A8");
-}
 async function connect() {
+  if (dirty) throw new Error("\u8BF7\u5148\u4FDD\u5B58\u8BBE\u7F6E\u6216\u64A4\u9500\u4FEE\u6539");
   bridge.cancel("connection_changed");
   const c = ctx();
   const settings = c.chatCompletionSettings;
@@ -373,6 +592,7 @@ async function connect() {
   config.enabled = true;
   config.nativeFirst = false;
   config = await bridge.api("/config", config);
+  savedConfig = structuredClone(config);
   await c.executeSlashCommandsWithOptions("/api quiet=true custom");
   for (const [id, value] of [
     ["custom_api_url_text", ENDPOINT],
@@ -493,38 +713,96 @@ function editor(node = {
   const save = el(
     "button",
     { type: "submit", className: "menu_button" },
-    "\u4FDD\u5B58\u8282\u70B9"
+    "\u5E94\u7528\u8282\u70B9"
   );
   actions.append(
     save,
-    button("xmark", "\u53D6\u6D88\u7F16\u8F91", () => area.replaceChildren())
+    button("xmark", "\u53D6\u6D88\u7F16\u8F91", () => {
+      area.replaceChildren();
+      editorRead = null;
+    })
   );
   form.append(actions);
+  const read = () => {
+    const data = new FormData(form);
+    return {
+      ...node,
+      id: node.id || crypto.randomUUID(),
+      name: data.get("name"),
+      url: data.get("url"),
+      model: data.get("model"),
+      protocol: data.get("protocol"),
+      key: data.get("key"),
+      priority: Number(data.get("priority")),
+      maxTokens: data.get("maxTokens") === "" ? null : Number(data.get("maxTokens")),
+      stream: streamInput.checked
+    };
+  };
+  const stage = () => {
+    if (!form.reportValidity()) throw new Error("\u8BF7\u586B\u5199\u6709\u6548\u7684\u8282\u70B9\u8BBE\u7F6E");
+    const updated = read();
+    const i = config.nodes.findIndex((n) => n.id === node.id);
+    if (i >= 0) config.nodes[i] = updated;
+    else config.nodes.push(updated);
+    editorRead = null;
+    area.replaceChildren();
+    dirty = true;
+  };
+  editorRead = stage;
+  form.addEventListener("input", () => {
+    dirty = true;
+    markDirty();
+  });
+  const models = el("datalist", { id: "sf-model-options" });
+  form.querySelector('[name="model"]').setAttribute("list", models.id);
+  form.append(models);
+  const modelStatus = el("p", { className: "sf-muted", role: "status" });
+  const modelButton = button(
+    "list",
+    "\u83B7\u53D6\u6A21\u578B\u5217\u8868",
+    () => void guarded(async () => {
+      modelButton.disabled = true;
+      models.replaceChildren();
+      modelStatus.textContent = "\u6B63\u5728\u83B7\u53D6\u6A21\u578B\u2026";
+      try {
+        const result = await bridge.api("/models", { node: read() });
+        models.replaceChildren(
+          ...result.models.map((id) => el("option", { value: id }))
+        );
+        modelStatus.textContent = `\u5DF2\u83B7\u53D6 ${result.models.length} \u4E2A\u6A21\u578B${result.truncated ? "\uFF08\u5217\u8868\u5DF2\u622A\u65AD\uFF09" : ""}`;
+      } catch (e) {
+        modelStatus.textContent = e.message;
+      } finally {
+        modelButton.disabled = false;
+      }
+    })
+  );
+  for (const input of [
+    protocol,
+    form.querySelector('[name="url"]'),
+    form.querySelector('[name="key"]')
+  ])
+    input.addEventListener("input", () => {
+      models.replaceChildren();
+      modelStatus.textContent = "";
+    });
+  actions.append(
+    modelButton,
+    button(
+      "flask",
+      "\u6D4B\u8BD5\u5F53\u524D\u8282\u70B9\uFF08\u53D1\u9001\u4E00\u6B21 API \u8BF7\u6C42\uFF09",
+      () => void runNodeTest(read())
+    )
+  );
+  form.append(modelStatus);
   form.onsubmit = (e) => {
     e.preventDefault();
     void guarded(async () => {
       save.disabled = true;
       try {
-        const data = new FormData(form);
-        const updated = {
-          ...node,
-          name: data.get("name"),
-          url: data.get("url"),
-          model: data.get("model"),
-          protocol: data.get("protocol"),
-          key: data.get("key"),
-          priority: Number(data.get("priority")),
-          maxTokens: data.get("maxTokens") === "" ? null : Number(data.get("maxTokens")),
-          stream: streamInput.checked
-        };
-        const nodes = [...config.nodes];
-        const i = nodes.findIndex((n) => n.id === node.id);
-        if (i >= 0) nodes[i] = updated;
-        else nodes.push(updated);
-        config = await bridge.api("/config", { ...config, nodes });
-        area.replaceChildren();
+        stage();
         render();
-        message("\u8282\u70B9\u5DF2\u4FDD\u5B58");
+        markDirty();
       } finally {
         save.disabled = false;
       }
@@ -534,9 +812,94 @@ function editor(node = {
   form.querySelector("input").focus();
 }
 async function saveConfig(changes) {
-  const updated = await bridge.api("/config", { ...config, ...changes });
-  config = { ...config, ...updated };
+  config = { ...config, ...changes };
+  dirty = true;
   render();
+  markDirty();
+}
+function markDirty() {
+  root.querySelector("[data-dirty]").textContent = dirty ? "\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539" : "\u5DF2\u4FDD\u5B58";
+}
+async function commitSettings() {
+  for (const input of root.querySelectorAll(
+    '[data-controls] input[type="number"], [data-advanced] input[type="number"]'
+  )) {
+    if (!input.disabled && (!input.value || !input.reportValidity()))
+      throw new Error("\u8BF7\u586B\u5199\u8303\u56F4\u5185\u7684\u6570\u503C\u8BBE\u7F6E");
+  }
+  editorRead?.();
+  const enabledNative = config.nativeFirst && !savedConfig.nativeFirst;
+  if (enabledNative && selected()) await restore();
+  if (enabledNative && (ctx().mainApi !== "openai" || !["custom", "openai", "claude", "makersuite"].includes(
+    ctx().chatCompletionSettings.chat_completion_source
+  ) || selected()))
+    throw new Error("\u8BF7\u5148\u9009\u62E9\u652F\u6301\u8054\u52A8\u7684\u539F\u751F API \u8FDE\u63A5");
+  const content = root.querySelector(".inline-drawer-content");
+  content.inert = true;
+  let updated;
+  try {
+    updated = await bridge.api("/config", config);
+  } finally {
+    content.inert = false;
+  }
+  config = updated;
+  savedConfig = structuredClone(updated);
+  dirty = false;
+  render();
+  markDirty();
+  message("\u8BBE\u7F6E\u5DF2\u4FDD\u5B58");
+}
+async function runNodeTest(node) {
+  const area = root.querySelector("[data-test]");
+  if (testControllers.size) {
+    message("\u5DF2\u6709\u8FDE\u901A\u6027\u6D4B\u8BD5\u6B63\u5728\u8FDB\u884C\uFF0C\u8BF7\u5148\u505C\u6B62");
+    return;
+  }
+  const id = crypto.randomUUID(), controller = new AbortController();
+  testControllers.add(controller);
+  const started = Date.now();
+  area.replaceChildren();
+  const status = el("p", { role: "status" });
+  const output = el("pre");
+  const stop = button("stop", "\u505C\u6B62\u6D4B\u8BD5", () => controller.abort());
+  area.append(
+    el("strong", {}, `\u8FDE\u901A\u6027\u6D4B\u8BD5 \xB7 ${node.name || "\u5F53\u524D\u8282\u70B9"}`),
+    status,
+    stop,
+    output
+  );
+  area.scrollIntoView({ block: "nearest" });
+  const tick = () => {
+    status.textContent = `\u6D4B\u8BD5\u4E2D \xB7 \u5DF2\u7B49\u5F85 ${Math.floor((Date.now() - started) / 1e3)} \u79D2`;
+  };
+  tick();
+  const timer = setInterval(tick, 1e3);
+  try {
+    let job = await bridge.api(
+      "/test",
+      { id, node, settings: config },
+      controller.signal
+    );
+    while (["running", "waiting"].includes(job.state)) {
+      await new Promise((r) => setTimeout(r, 500));
+      job = await bridge.api("/jobs/" + id, void 0, controller.signal);
+    }
+    clearInterval(timer);
+    status.textContent = `${job.state === "succeeded" ? "\u6D4B\u8BD5\u6210\u529F" : job.state === "cancelled" ? "\u6D4B\u8BD5\u5DF2\u505C\u6B62" : "\u6D4B\u8BD5\u5931\u8D25"} \xB7 ${((Date.now() - started) / 1e3).toFixed(1)} \u79D2 \xB7 ${node.model}`;
+    output.textContent = job.state === "succeeded" ? (job.result?.choices?.[0]?.message?.content || "\u65E0\u6B63\u6587\uFF0C\u67E5\u770B\u7ED3\u675F\u539F\u56E0").slice(0, 500) : job.attempts?.at(-1)?.message || job.reason || "\u672A\u53D6\u5F97\u56DE\u590D";
+    if (job.state === "succeeded") await bridge.api("/jobs/" + id + "/ack", {});
+  } catch (e) {
+    clearInterval(timer);
+    status.textContent = controller.signal.aborted ? "\u6D4B\u8BD5\u5DF2\u505C\u6B62" : "\u6D4B\u8BD5\u5931\u8D25";
+    output.textContent = controller.signal.aborted ? "" : e.message;
+    await bridge.api("/jobs/" + id + "/cancel", { reason: "user_cancel" }).catch(() => {
+    });
+  } finally {
+    clearInterval(timer);
+    stop.disabled = true;
+    testControllers.delete(controller);
+    await refreshRecords();
+  }
 }
 function renderNative() {
   const area = root.querySelector("[data-native]");
@@ -598,13 +961,7 @@ function render() {
     checked: config.nativeFirst
   });
   nativeInput.setAttribute("aria-label", "\u539F\u751F\u8FDE\u63A5\u4F18\u5148");
-  nativeInput.onchange = () => void guarded(async () => {
-    try {
-      await setNativeFirst(nativeInput.checked);
-    } finally {
-      render();
-    }
-  });
+  nativeInput.onchange = () => void guarded(() => saveConfig({ nativeFirst: nativeInput.checked }));
   native.append(nativeInput, document.createTextNode("\u539F\u751F\u8FDE\u63A5\u4F18\u5148"));
   controls.append(native);
   renderNative();
@@ -615,8 +972,63 @@ function render() {
     "number",
     { min: 1, max: 3600 }
   );
-  interval.querySelector("input").onchange = (e) => void guarded(() => saveConfig({ intervalSeconds: Number(e.target.value) }));
+  interval.querySelector("input").oninput = (e) => {
+    config.intervalSeconds = Number(e.target.value);
+    dirty = true;
+    markDirty();
+  };
   controls.append(interval);
+  const rounds = labelInput(
+    "\u603B\u8F6E\u6B21\u4E0A\u9650\uFF080 \u4E0D\u9650\uFF09",
+    "maxRounds",
+    config.maxRounds ?? 0,
+    "number",
+    { min: 0, max: 1e4, step: 1 }
+  );
+  rounds.querySelector("input").oninput = (e) => {
+    config.maxRounds = Number(e.target.value);
+    dirty = true;
+    markDirty();
+  };
+  controls.append(rounds);
+  for (const [key, title, options] of [
+    [
+      "notificationMode",
+      "\u63D0\u793A\u65B9\u5F0F",
+      [
+        ["silent", "\u5B8C\u5168\u9759\u9ED8"],
+        ["failure", "\u4EC5\u6700\u7EC8\u5931\u8D25\u63D0\u793A"],
+        ["progress", "\u663E\u793A\u5207\u6362\u8FC7\u7A0B"]
+      ]
+    ],
+    [
+      "waitMode",
+      "\u7B49\u5F85\u7B56\u7565",
+      [
+        ["patient", "\u8010\u5FC3\u7B49\u5F85"],
+        ["limited", "\u9650\u65F6\u5207\u6362"]
+      ]
+    ]
+  ]) {
+    const label = el("label", { className: "sf-field" });
+    const select = el("select", { className: "text_pole", name: key });
+    select.setAttribute("aria-label", title);
+    label.append(el("span", {}, title), select);
+    for (const [value, text] of options)
+      select.append(
+        el("option", { value, selected: config[key] === value }, text)
+      );
+    select.onchange = () => void saveConfig({ [key]: select.value });
+    controls.append(label);
+  }
+  const floatLabel = el("label", { className: "sf-check" });
+  const floatInput = el("input", {
+    type: "checkbox",
+    checked: config.floatingWindow
+  });
+  floatInput.onchange = () => void saveConfig({ floatingWindow: floatInput.checked });
+  floatLabel.append(floatInput, document.createTextNode("\u663E\u793A\u60AC\u6D6E\u7A97"));
+  controls.append(floatLabel);
   const nodes = root.querySelector("[data-nodes]");
   nodes.replaceChildren();
   if (!config.nodes.length)
@@ -660,21 +1072,7 @@ function render() {
     const test = button(
       "flask",
       "\u6D4B\u8BD5 " + n.name + "\uFF08\u53D1\u9001\u4E00\u6B21 API \u8BF7\u6C42\uFF09",
-      () => void guarded(async () => {
-        test.disabled = true;
-        try {
-          const job = await bridge.api("/test", { nodeId: n.id });
-          await refreshRecords();
-          let j = job;
-          while (["running", "waiting"].includes(j.state)) {
-            await new Promise((r) => setTimeout(r, 600));
-            j = await bridge.api("/jobs/" + j.id);
-          }
-          await refreshRecords();
-        } finally {
-          test.disabled = false;
-        }
-      })
+      () => void runNodeTest(n)
     );
     actions.append(
       up,
@@ -699,12 +1097,13 @@ function render() {
   const advanced = root.querySelector("[data-advanced]");
   advanced.replaceChildren();
   for (const [key, label, min, max] of [
-    ["timeoutSeconds", "\u5355\u8282\u70B9\u603B\u8D85\u65F6\uFF08\u79D2\uFF09", 1, 3600],
-    ["headerSeconds", "\u54CD\u5E94\u5934\u8D85\u65F6\uFF08\u79D2\uFF09", 1, 600],
-    ["firstTokenSeconds", "\u9996\u6570\u636E\u8D85\u65F6\uFF08\u79D2\uFF09", 1, 600],
-    ["idleSeconds", "\u6570\u636E\u95F4\u9694\u8D85\u65F6\uFF08\u79D2\uFF09", 1, 600]
+    ["timeoutSeconds", "\u5355\u8282\u70B9\u603B\u8D85\u65F6\uFF08\u79D2\uFF0C0 \u5173\u95ED\uFF09", 0, 86400],
+    ["headerSeconds", "\u54CD\u5E94\u5934\u8D85\u65F6\uFF08\u79D2\uFF0C0 \u5173\u95ED\uFF09", 0, 86400],
+    ["firstTokenSeconds", "\u9996\u6570\u636E\u8D85\u65F6\uFF08\u79D2\uFF0C0 \u5173\u95ED\uFF09", 0, 86400],
+    ["idleSeconds", "\u6570\u636E\u95F4\u9694\u8D85\u65F6\uFF08\u79D2\uFF0C0 \u5173\u95ED\uFF09", 0, 86400]
   ]) {
     const field = labelInput(label, key, config[key], "number", { min, max });
+    field.querySelector("input").disabled = config.waitMode === "patient";
     field.querySelector("input").onchange = (e) => void guarded(async () => {
       if (!e.target.value || !e.target.checkValidity()) {
         recordEvent("timeout_setting_rejected");
@@ -715,6 +1114,7 @@ function render() {
     });
     advanced.append(field);
   }
+  markDirty();
 }
 async function refreshRecords() {
   if (!root?.isConnected) return;
@@ -781,7 +1181,7 @@ async function refreshRecords() {
       detail.append(
         button(
           "stop",
-          "\u505C\u6B62\u6B64\u4EFB\u52A1",
+          "\u505C\u6B62\u751F\u6210",
           () => void guarded(async () => {
             await bridge.api("/jobs/" + r.id + "/cancel", {
               reason: "user_cancel"
@@ -961,6 +1361,20 @@ async function boot() {
   root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>\u9759\u9ED8 API \u6545\u969C\u8F6C\u79FB</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><div class="sf-actions" data-actions></div><p class="sf-muted" data-status></p><div class="sf-controls" data-controls></div><div data-editor></div><div data-native></div><div data-nodes></div><details><summary>\u8D85\u65F6\u8BBE\u7F6E</summary><div class="sf-fields" data-advanced></div></details><details data-history><summary>\u8BF7\u6C42\u8BB0\u5F55</summary><div class="sf-actions" data-log-actions></div><div data-records></div></details></div></div>`;
   document.getElementById("extensions_settings2").append(root);
   const actions = root.querySelector("[data-actions]");
+  const dirtyStatus = el("p", { className: "sf-muted", role: "status" });
+  dirtyStatus.dataset.dirty = "";
+  actions.after(dirtyStatus);
+  const testArea = el("div", { className: "sf-test-result" });
+  testArea.dataset.test = "";
+  root.querySelector("[data-editor]").after(testArea);
+  panel = createTaskPanel(bridge.api, () => {
+    root.querySelector(".inline-drawer-content").style.display = "block";
+    root.querySelector("[data-history]").open = true;
+    const drawer = root.closest(".drawer-content");
+    if (!drawer || getComputedStyle(drawer).display === "none")
+      document.getElementById("extensions-settings-button")?.querySelector(".drawer-toggle")?.click();
+    void refreshRecords();
+  });
   const connectButton = el(
     "button",
     { type: "button", className: "menu_button" },
@@ -977,11 +1391,45 @@ async function boot() {
       "rotate",
       "\u5237\u65B0\u914D\u7F6E",
       () => void guarded(async () => {
+        if (dirty) throw new Error("\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u8BF7\u5148\u4FDD\u5B58\u6216\u64A4\u9500");
         config = await bridge.api("/config");
+        savedConfig = structuredClone(config);
         render();
         message("\u670D\u52A1\u7AEF\u5DF2\u8FDE\u63A5");
       })
     )
+  );
+  const saveButton = button(
+    "floppy-disk",
+    "\u4FDD\u5B58\u8BBE\u7F6E",
+    () => void guarded(async () => {
+      if (saveButton.disabled) return;
+      saveButton.disabled = true;
+      try {
+        await commitSettings();
+      } finally {
+        saveButton.disabled = false;
+      }
+    })
+  );
+  saveButton.append(document.createTextNode(" \u4FDD\u5B58\u8BBE\u7F6E"));
+  saveButton.classList.remove("sf-icon");
+  actions.append(
+    saveButton,
+    button("rotate-left", "\u64A4\u9500\u4FEE\u6539", () => {
+      config = structuredClone(savedConfig);
+      dirty = false;
+      editorRead = null;
+      root.querySelector("[data-editor]").replaceChildren();
+      render();
+      message("\u5DF2\u64A4\u9500\u672A\u4FDD\u5B58\u7684\u4FEE\u6539");
+    }),
+    button("window-restore", "\u663E\u793A\u4EFB\u52A1\u60AC\u6D6E\u7A97", () => {
+      if (!config) return;
+      void saveConfig({ floatingWindow: true });
+      panel.update(config, []);
+      panel.show();
+    })
   );
   const update = button(
     "download",
@@ -1021,20 +1469,34 @@ async function boot() {
     bridge.cancel("chat_changed");
     snapshot = null;
   });
-  const unload = () => bridge.cancel("page_closed");
+  const unload = () => {
+    bridge.cancel("page_closed");
+    for (const c of testControllers) c.abort();
+  };
   window.addEventListener("pagehide", unload);
   subscriptions.push(["pagehide", unload]);
   refreshTimer = setInterval(() => {
     renderNative();
-    if (root.querySelector("[data-history]").open && !document.hidden)
-      void refreshRecords();
-  }, 2500);
+    if (!document.hidden) {
+      if (root.querySelector("[data-history]").open) void refreshRecords();
+      if (config)
+        void bridge.api("/records").then(
+          (records) => panel.update(
+            { ...savedConfig, floatingWindow: config.floatingWindow },
+            records
+          )
+        ).catch(() => {
+        });
+    }
+  }, 1e3);
   await guarded(async () => {
     config = await bridge.api("/config");
+    savedConfig = structuredClone(config);
     render();
     message(
       `\u524D\u7AEF ${VERSION} \xB7 \u670D\u52A1\u7AEF ${config.version || "\u672A\u77E5"}${config.version !== VERSION ? " \xB7 \u8BF7\u540C\u6B65\u5347\u7EA7\u4E24\u90E8\u5206" : " \xB7 \u5DF2\u8FDE\u63A5"}`
     );
+    panel.update(config, await bridge.api("/records"));
     root.querySelector("[data-update]").disabled = config.canUpdate === false;
     if (config.updateSupported) {
       const state = await bridge.api("/update/status");
@@ -1047,12 +1509,14 @@ async function boot() {
   });
 }
 async function onDisable() {
-  if (bridge && config)
-    await bridge.api("/config", { ...config, enabled: false }).catch(() => {
+  if (bridge && savedConfig)
+    await bridge.api("/config", { ...savedConfig, enabled: false }).catch(() => {
     });
   if (selected()) await restore().catch(() => {
   });
   bridge?.dispose();
+  for (const c of testControllers) c.abort();
+  panel?.dispose();
   clearInterval(refreshTimer);
   for (const [event, fn] of subscriptions.splice(0)) {
     if (event === "pagehide") window.removeEventListener(event, fn);

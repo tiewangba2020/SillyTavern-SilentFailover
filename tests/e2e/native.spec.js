@@ -354,7 +354,8 @@ test("linkage UI preserves native connection across mode changes and reload", as
     root.getByLabel("原生连接优先", { exact: true }),
   ).not.toBeChecked();
   await root.getByLabel("原生连接优先", { exact: true }).check();
-  await expect(root.locator("[data-status]")).toHaveText("已联动原生连接");
+  await root.getByRole("button", { name: "保存设置", exact: true }).click();
+  await expect(root.locator("[data-status]")).toHaveText("设置已保存");
   expect(
     await page.evaluate(
       () => SillyTavern.getContext().chatCompletionSettings.custom_url,

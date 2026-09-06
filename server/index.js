@@ -6,6 +6,7 @@ import { loadNativeSecrets, nativeNode } from "./native.js";
 import { attempt } from "./upstream.js";
 import { VERSION } from "./version.js";
 import { Updater } from "./update.js";
+import { listModels } from "./models.js";
 export const info = {
   id: "silent-failover",
   name: "Silent API Failover",
@@ -136,6 +137,37 @@ export async function init(router, options = {}) {
     route((req, res) => res.json(req.failover.jobs.list())),
   );
   router.post(
+    "/jobs/:id/switch",
+    route((req, res) =>
+      res.json(req.failover.jobs.switchNode(req.params.id, req.body?.nodeId)),
+    ),
+  );
+  router.post("/models", async (req, res) => {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    res.on("close", abort);
+    try {
+      const node = req.failover.store.previewNode(req.body?.node, false);
+      res.json(
+        await listModels(
+          node,
+          AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]),
+        ),
+      );
+    } catch (e) {
+      if (!res.destroyed)
+        res
+          .status(e.status || 400)
+          .json({
+            error: e.status
+              ? `获取模型失败（HTTP ${e.status}），可手动填写模型 ID`
+              : "无法获取模型列表，请检查地址和网络，或手动填写模型 ID",
+          });
+    } finally {
+      res.off("close", abort);
+    }
+  });
+  router.post(
     "/jobs/:id/ack",
     route((req, res) => {
       req.failover.jobs.acknowledge(req.params.id);
@@ -177,11 +209,9 @@ export async function init(router, options = {}) {
     try {
       res.json(await updater.check());
     } catch {
-      res
-        .status(502)
-        .json({
-          error: "无法取得 GitHub 正式版更新信息，请检查网络或下载完整安装包",
-        });
+      res.status(502).json({
+        error: "无法取得 GitHub 正式版更新信息，请检查网络或下载完整安装包",
+      });
     }
   });
   router.post(
@@ -206,19 +236,36 @@ export async function init(router, options = {}) {
         return res
           .status(409)
           .json({ error: "插件更新中或等待重启，请重启酒馆后测试" });
-      const node = req.failover.store.config.nodes.find(
-        (n) => n.id === req.body.nodeId,
-      );
+      const node = req.body.node
+        ? req.failover.store.previewNode(req.body.node)
+        : req.failover.store.config.nodes.find((n) => n.id === req.body.nodeId);
       if (!node) throw new Error("节点不存在");
       res.json(
         req.failover.jobs.create(
-          randomUUID(),
+          req.body.id || randomUUID(),
           {
             messages: [{ role: "user", content: "Reply with OK." }],
-            max_tokens: node.protocol && node.protocol !== "openai" ? 256 : 8,
+            max_tokens: 256,
             ...(node.protocol === "gemini" ? { reasoning_effort: "min" } : {}),
           },
-          { testNode: req.body.nodeId },
+          {
+            testNode: node.id,
+            previewNode: node,
+            testSettings: req.failover.store.validate({
+              ...req.failover.store.publicConfig(),
+              ...Object.fromEntries(
+                [
+                  "waitMode",
+                  "timeoutSeconds",
+                  "headerSeconds",
+                  "firstTokenSeconds",
+                  "idleSeconds",
+                ]
+                  .filter((k) => req.body.settings?.[k] !== undefined)
+                  .map((k) => [k, req.body.settings[k]]),
+              ),
+            }),
+          },
         ),
       );
     }),

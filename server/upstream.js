@@ -2,6 +2,8 @@ import { createParser } from "eventsource-parser";
 import { Failure } from "./errors.js";
 import { prepare, nativeCompletion } from "./protocols.js";
 import { completionSummary } from "./diagnostics.js";
+import { Agent } from "undici";
+const providerAgent = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
 const LIMIT = 8 * 1024 * 1024;
 export function normalizeRequest(input) {
   if (!input || !Array.isArray(input.messages) || !input.messages.length)
@@ -108,15 +110,19 @@ export async function attempt(
   let timer;
   const arm = (seconds, phase) => {
     clearTimeout(timer);
+    if (settings.waitMode === "patient" || !seconds) return;
     timer = setTimeout(
       () => controller.abort(timeError(phase)),
       seconds * 1000,
     );
   };
-  const total = setTimeout(
-    () => controller.abort(timeError("total")),
-    settings.timeoutSeconds * 1000,
-  );
+  const total =
+    settings.waitMode !== "patient" && settings.timeoutSeconds
+      ? setTimeout(
+          () => controller.abort(timeError("total")),
+          settings.timeoutSeconds * 1000,
+        )
+      : null;
   let reader;
   try {
     arm(settings.headerSeconds, "headers");
@@ -130,6 +136,7 @@ export async function attempt(
       },
       body: JSON.stringify(prepared.body),
       signal,
+      dispatcher: providerAgent,
     });
     diagnostics.httpStatus = response.status;
     diagnostics.headersMs = Date.now() - started;
@@ -148,10 +155,7 @@ export async function attempt(
       : mime
         ? "other"
         : "missing";
-    arm(
-      node.stream ? settings.firstTokenSeconds : settings.timeoutSeconds,
-      "first_data",
-    );
+    arm(settings.firstTokenSeconds, "first_data");
     reader = response.body?.getReader();
     if (!reader)
       throw new Failure("Missing response body", { category: "protocol" });
@@ -255,6 +259,8 @@ export async function attempt(
       bytes += chunk.value.byteLength;
       diagnostics.bytes = bytes;
       diagnostics.firstDataMs ??= Date.now() - started;
+      diagnostics.lastDataMs = Date.now() - started;
+      arm(settings.idleSeconds, "idle");
       if (bytes > LIMIT)
         throw new Failure("Response exceeds 8 MiB", {
           category: "limit",
