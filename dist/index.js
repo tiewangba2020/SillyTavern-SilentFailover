@@ -248,7 +248,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.4.1";
+var VERSION = "1.4.2";
 
 // extension/panel.js
 var make = (tag, cls, text) => {
@@ -761,9 +761,12 @@ function editor(node = {
       node.key || node.keySet ? "API Key\uFF08\u7559\u7A7A\u4FDD\u7559\uFF09" : "API Key",
       "key",
       "",
-      "password",
+      "text",
       {
-        autocomplete: "new-password",
+        autocomplete: "off",
+        inputMode: "text",
+        autocapitalize: "none",
+        spellcheck: false,
         placeholder: node.key ? "\u5DF2\u586B\u5199\uFF0C\u4FDD\u5B58\u8BBE\u7F6E\u540E\u751F\u6548" : node.keySet ? "\u5DF2\u4FDD\u5B58\uFF0C\u7559\u7A7A\u4E0D\u66F4\u6362" : "\u586B\u5199 API Key"
       }
     ),
@@ -773,6 +776,7 @@ function editor(node = {
       required: true
     })
   );
+  fields.querySelector('[name="key"]').setAttribute("autocorrect", "off");
   const stream = el("label", { className: "sf-check" });
   const streamInput = el("input", {
     type: "checkbox",

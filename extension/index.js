@@ -164,9 +164,12 @@ function editor(
       node.key || node.keySet ? "API Key（留空保留）" : "API Key",
       "key",
       "",
-      "password",
+      "text",
       {
-        autocomplete: "new-password",
+        autocomplete: "off",
+        inputMode: "text",
+        autocapitalize: "none",
+        spellcheck: false,
         placeholder: node.key
           ? "已填写，保存设置后生效"
           : node.keySet
@@ -180,6 +183,7 @@ function editor(
       required: true,
     }),
   );
+  fields.querySelector('[name="key"]').setAttribute("autocorrect", "off");
   const stream = el("label", { className: "sf-check" });
   const streamInput = el("input", {
     type: "checkbox",

@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.4.1.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.4.2.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -203,9 +203,9 @@ volumes:
 
 ```bash
 docker compose stop sillytavern
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.1/SillyTavern-SilentFailover-v1.4.1.zip -o SillyTavern-SilentFailover-v1.4.1.zip
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.1/SHA256SUMS-1.4.1 -o SHA256SUMS-1.4.1
-sha256sum --check --ignore-missing SHA256SUMS-1.4.1 && unzip SillyTavern-SilentFailover-v1.4.1.zip -d api-still-up-package
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.2/SillyTavern-SilentFailover-v1.4.2.zip -o SillyTavern-SilentFailover-v1.4.2.zip
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.2/SHA256SUMS-1.4.2 -o SHA256SUMS-1.4.2
+sha256sum --check --ignore-missing SHA256SUMS-1.4.2 && unzip SillyTavern-SilentFailover-v1.4.2.zip -d api-still-up-package
 docker compose run --rm --no-deps --entrypoint node -v "$PWD/api-still-up-package:/tmp/api-still-up-package:ro" sillytavern /tmp/api-still-up-package/install.mjs --target /home/node/app --config /home/node/app/config/config.yaml
 docker compose up -d sillytavern
 ```
@@ -246,7 +246,9 @@ docker compose up -d sillytavern
 | Claude 原生 | `https://api.anthropic.com/v1` | 完整 `/v1/messages` 地址 |
 | Gemini 原生 | `https://generativelanguage.googleapis.com` | 以 `/v1beta` 结尾的地址 |
 
-使用中转服务时，地址和协议以该服务的说明为准，不能仅凭模型名称判断协议。填写并应用节点后显示“Key 已填写（待保存）”，点击顶部“保存设置”后显示“Key 已保存”和掩码。再次编辑时密钥框不回显，留空表示保留已填写或已保存的 Key。
+使用中转服务时，地址和协议以该服务的说明为准，不能仅凭模型名称判断协议。API Key 使用普通文本输入框，输入时显示明文，支持粘贴，并关闭自动大写、自动纠正和拼写检查，避免密码输入框触发部分手机禁止粘贴的安全键盘。实际键盘行为仍由手机系统与输入法决定。
+
+填写并应用节点后显示“Key 已填写（待保存）”，点击顶部“保存设置”后显示“Key 已保存”和掩码。再次编辑时密钥框不回显，留空表示保留已填写或已保存的 Key。
 
 ### 2. 选择连接方式
 

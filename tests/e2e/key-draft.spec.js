@@ -1,5 +1,11 @@
 import { test, expect } from "@playwright/test";
 
+test.use({
+  viewport: { width: 390, height: 844 },
+  hasTouch: true,
+  isMobile: true,
+});
+
 test("applying and reopening a node retains its pending Key until settings are saved", async ({
   page,
 }) => {
@@ -15,9 +21,19 @@ test("applying and reopening a node retains its pending Key until settings are s
     .getByLabel("API 地址", { exact: true })
     .fill("http://127.0.0.1:9107/C/v1");
   await root.getByLabel("模型 ID", { exact: true }).fill("mock-C");
-  await root
-    .getByLabel("API Key", { exact: true })
-    .fill("test-draft-key-local-only");
+  const key = root.getByLabel("API Key", { exact: true });
+  await expect(key).toHaveAttribute("type", "text");
+  await expect(key).toHaveAttribute("autocomplete", "off");
+  await expect(key).toHaveAttribute("autocapitalize", "none");
+  await expect(key).toHaveAttribute("autocorrect", "off");
+  await expect(key).toHaveAttribute("spellcheck", "false");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.evaluate(() =>
+    navigator.clipboard.writeText("test-draft-key-local-only"),
+  );
+  await key.tap();
+  await page.keyboard.press("ControlOrMeta+V");
+  await expect(key).toHaveValue("test-draft-key-local-only");
   await root.getByRole("button", { name: "应用节点", exact: true }).click();
   const row = root.locator(".sf-node").filter({ hasText: name });
   await expect(row).toContainText("Key 已填写（待保存）");
