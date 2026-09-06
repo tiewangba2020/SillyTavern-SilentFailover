@@ -1,0 +1,269 @@
+export const ENDPOINT = "http://sillytavern-failover.invalid/v1";
+export const API = "/api/plugins/silent-failover";
+export const cancelled = () =>
+  new DOMException("Silent failover stopped", "AbortError");
+const json = (value) =>
+  new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+const delay = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(cancelled());
+    const done = () => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      reject(cancelled());
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+export function installAdapter(
+  context,
+  onLocalRecord = () => {},
+  lifecycle = {},
+) {
+  const previous = window.fetch;
+  const active = new Map();
+  let disposed = false;
+  async function api(path, body, signal) {
+    const response = await previous(API + path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: context().getRequestHeaders(),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(12000)])
+        : AbortSignal.timeout(12000),
+    });
+    const data = await response.json();
+    if (!response.ok)
+      throw Object.assign(new Error(data.error || "服务端请求失败"), {
+        status: response.status,
+      });
+    return data;
+  }
+  async function wrapper(input, init) {
+    const url = new URL(
+      input instanceof Request ? input.url : String(input),
+      location.href,
+    );
+    if (
+      disposed ||
+      url.origin !== location.origin ||
+      ![
+        "/api/backends/chat-completions/generate",
+        "/api/backends/chat-completions/status",
+      ].includes(url.pathname)
+    )
+      return previous(input, init);
+    let body;
+    try {
+      body =
+        typeof init?.body === "string"
+          ? JSON.parse(init.body)
+          : input instanceof Request
+            ? await input.clone().json()
+            : null;
+    } catch {
+      return previous(input, init);
+    }
+    if (
+      !["custom", "openai", "claude", "makersuite"].includes(
+        body?.chat_completion_source,
+      )
+    )
+      return previous(input, init);
+    const dedicated =
+      body.chat_completion_source === "custom" && body.custom_url === ENDPOINT;
+    let nativeFirst = false;
+    if (!dedicated) {
+      const settings = await api("/config").catch(() => null);
+      nativeFirst =
+        settings?.enabled === true && settings?.nativeFirst === true;
+      if (!nativeFirst) return previous(input, init);
+    }
+    if (url.pathname.endsWith("/status"))
+      return json({
+        data: [
+          {
+            id: nativeFirst
+              ? context().chatCompletionSettings[
+                  {
+                    custom: "custom_model",
+                    openai: "openai_model",
+                    claude: "claude_model",
+                    makersuite: "google_model",
+                  }[body.chat_completion_source]
+                ] || "native-default"
+              : "failover-default",
+            object: "model",
+          },
+        ],
+      });
+    const id = crypto.randomUUID();
+    const saved = lifecycle.start?.();
+    const controller = new AbortController();
+    const originalSignal =
+      init?.signal || (input instanceof Request ? input.signal : null);
+    const abort = () => controller.abort("client_aborted");
+    originalSignal?.addEventListener("abort", abort, { once: true });
+    if (originalSignal?.aborted) abort();
+    active.set(id, controller);
+    try {
+      let job;
+      let lastContact = Date.now();
+      while (!job) {
+        try {
+          job = await api(
+            "/jobs",
+            { id, request: body, nativeFirst },
+            controller.signal,
+          );
+          lastContact = Date.now();
+        } catch (e) {
+          if (
+            controller.signal.aborted ||
+            (e.status && e.status < 500) ||
+            Date.now() - lastContact > 55000
+          )
+            throw e;
+          await delay(1000, controller.signal);
+        }
+      }
+      while (["running", "waiting"].includes(job.state)) {
+        await delay(600, controller.signal);
+        try {
+          job = await api("/jobs/" + id, undefined, controller.signal);
+          lastContact = Date.now();
+        } catch (e) {
+          if (
+            controller.signal.aborted ||
+            e.status === 404 ||
+            Date.now() - lastContact > 55000
+          )
+            throw e;
+        }
+      }
+      if (controller.signal.aborted || job.state !== "succeeded")
+        throw cancelled();
+      void api("/jobs/" + id + "/ack", {}).catch(() => {});
+      if (!body.stream) return json(job.result);
+      const choice = job.result.choices[0];
+      const source = body.chat_completion_source;
+      if (source === "claude" || source === "makersuite") {
+        const message = choice.message;
+        const chunks =
+          source === "claude"
+            ? [
+                ...(message.reasoning_content
+                  ? [
+                      {
+                        type: "content_block_delta",
+                        index: 0,
+                        delta: {
+                          type: "thinking_delta",
+                          thinking: message.reasoning_content,
+                        },
+                      },
+                    ]
+                  : []),
+                {
+                  type: "content_block_delta",
+                  index: 0,
+                  delta: { type: "text_delta", text: message.content },
+                },
+                { type: "message_delta", delta: { stop_reason: "end_turn" } },
+                { type: "message_stop" },
+              ]
+            : [
+                ...(message.reasoning_content
+                  ? [
+                      {
+                        candidates: [
+                          {
+                            content: {
+                              parts: [
+                                {
+                                  text: message.reasoning_content,
+                                  thought: true,
+                                },
+                              ],
+                            },
+                          },
+                        ],
+                      },
+                    ]
+                  : []),
+                {
+                  candidates: [
+                    {
+                      content: { parts: [{ text: message.content }] },
+                      finishReason: "STOP",
+                    },
+                  ],
+                },
+              ];
+        return new Response(
+          chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") +
+            "data: [DONE]\n\n",
+          {
+            headers: { "Content-Type": "text/event-stream" },
+          },
+        );
+      }
+      const chunk = {
+        id: job.result.id,
+        object: "chat.completion.chunk",
+        model: job.result.model,
+        choices: [
+          {
+            index: 0,
+            delta: choice.message,
+            finish_reason: choice.finish_reason,
+          },
+        ],
+      };
+      return new Response(
+        `data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`,
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    } catch (e) {
+      if (!controller.signal.aborted && e.name !== "AbortError")
+        onLocalRecord({
+          started: Date.now(),
+          state: "invalid",
+          reason: "服务端连接不可用或请求无效",
+          attempts: [],
+        });
+      void api("/jobs/" + id + "/cancel", {
+        reason: controller.signal.aborted
+          ? controller.signal.reason || "client_aborted"
+          : "client_error",
+      }).catch(() => {});
+      await lifecycle.failed?.(saved);
+      throw cancelled();
+    } finally {
+      active.delete(id);
+      originalSignal?.removeEventListener("abort", abort);
+    }
+  }
+  window.fetch = wrapper;
+  return {
+    api,
+    cancel(reason = "client_aborted") {
+      for (const controller of active.values()) controller.abort(reason);
+    },
+    dispose() {
+      disposed = true;
+      this.cancel("plugin_disabled");
+      if (window.fetch === wrapper) window.fetch = previous;
+    },
+    get active() {
+      return active.size;
+    },
+  };
+}

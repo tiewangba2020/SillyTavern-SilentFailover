@@ -1,0 +1,305 @@
+import { createParser } from "eventsource-parser";
+import { Failure } from "./errors.js";
+import { prepare, nativeCompletion } from "./protocols.js";
+const LIMIT = 8 * 1024 * 1024;
+export function normalizeRequest(input) {
+  if (!input || !Array.isArray(input.messages) || !input.messages.length)
+    throw new Error("请求缺少消息");
+  if (input.n != null && input.n !== 1) throw new Error("暂不支持多个候选回复");
+  if (input.enable_web_search || input.request_images)
+    throw new Error("故障转移目前只支持文本聊天，不支持联网搜索或图像生成");
+  if (
+    input.tools?.length ||
+    input.functions?.length ||
+    input.tool_choice ||
+    input.function_call
+  )
+    throw new Error("暂不支持工具调用");
+  if (
+    input.messages.some(
+      (m) =>
+        !["user", "assistant", "system", "developer"].includes(m.role) ||
+        typeof m.content !== "string",
+    )
+  )
+    throw new Error("第一版只支持文本聊天消息");
+  if (
+    input.custom_include_body?.trim() ||
+    input.custom_exclude_body?.trim() ||
+    input.custom_include_headers?.trim()
+  )
+    throw new Error("请清空此专用连接的自定义请求体和请求头");
+  const out = { messages: structuredClone(input.messages) };
+  for (const name of [
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "max_completion_tokens",
+    "frequency_penalty",
+    "presence_penalty",
+    "stop",
+    "seed",
+    "logit_bias",
+    "response_format",
+    "reasoning_effort",
+    "verbosity",
+  ])
+    if (input[name] != null) out[name] = structuredClone(input[name]);
+  if (input.json_schema)
+    out.response_format = {
+      type: "json_schema",
+      json_schema: {
+        name: input.json_schema.name || "response",
+        strict: input.json_schema.strict ?? true,
+        schema: input.json_schema.value,
+      },
+    };
+  return out;
+}
+function providerFailure(data, status, phase = "response") {
+  return new Failure(
+    data?.error?.message || data?.message || "API request failed",
+    { status, code: data?.error?.code || data?.error?.type, phase },
+  );
+}
+function validate(data) {
+  if (data?.error) throw providerFailure(data, 200);
+  const choice = data?.choices?.[0];
+  if (choice?.message?.tool_calls?.length)
+    throw new Failure("Unexpected tool calls", {
+      category: "protocol",
+      phase: "parse",
+    });
+  const text = choice?.message?.content;
+  if (
+    !choice ||
+    (!String(text ?? "").trim() &&
+      !choice.message?.refusal &&
+      choice.finish_reason !== "content_filter")
+  )
+    throw new Failure("Empty or invalid completion", {
+      category: "protocol",
+      phase: "parse",
+    });
+  if (typeof text !== "string" && text != null)
+    throw new Failure("Non-text completion", {
+      category: "protocol",
+      phase: "parse",
+    });
+  if (!text && choice.message?.refusal)
+    choice.message.content = choice.message.refusal;
+  return data;
+}
+export async function attempt(node, payload, parent, settings, host = null) {
+  const controller = new AbortController();
+  const signal = AbortSignal.any([parent, controller.signal]);
+  const timeError = (phase) =>
+    new Failure("API timeout", { category: "timeout", phase });
+  let timer;
+  const arm = (seconds, phase) => {
+    clearTimeout(timer);
+    timer = setTimeout(
+      () => controller.abort(timeError(phase)),
+      seconds * 1000,
+    );
+  };
+  const total = setTimeout(
+    () => controller.abort(timeError("total")),
+    settings.timeoutSeconds * 1000,
+  );
+  let reader;
+  try {
+    arm(settings.headerSeconds, "headers");
+    const prepared = prepare(node, payload, host);
+    const response = await fetch(prepared.url, {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        "Content-Type": "application/json",
+        ...prepared.headers,
+      },
+      body: JSON.stringify(prepared.body),
+      signal,
+    });
+    arm(
+      node.stream ? settings.firstTokenSeconds : settings.timeoutSeconds,
+      "first_data",
+    );
+    reader = response.body?.getReader();
+    if (!reader)
+      throw new Failure("Missing response body", { category: "protocol" });
+    const decoder = new TextDecoder();
+    let bytes = 0;
+    let text = "";
+    let done = false;
+    let finish = null;
+    let content = "";
+    let reasoning = "";
+    let refusal = "";
+    let usage;
+    let responseId;
+    const isSse =
+      response.ok &&
+      response.headers.get("content-type")?.includes("text/event-stream");
+    const parser = createParser({
+      onEvent(event) {
+        if (event.data === "[DONE]") {
+          done = true;
+          return;
+        }
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          throw new Failure("Invalid SSE JSON", {
+            category: "protocol",
+            phase: "parse",
+          });
+        }
+        if (data.error) throw providerFailure(data, 200, "stream");
+        if (node.protocol === "claude") {
+          if (data.type === "message_start") {
+            responseId = data.message?.id;
+            usage = data.message?.usage;
+          }
+          if (data.type === "content_block_start") {
+            if (
+              !["text", "thinking", "redacted_thinking"].includes(
+                data.content_block?.type,
+              )
+            )
+              throw new Failure("Non-text Claude stream", {
+                category: "protocol",
+              });
+            content += data.content_block?.text || "";
+            reasoning += data.content_block?.thinking || "";
+          }
+          if (data.type === "content_block_delta") {
+            content += data.delta?.text || "";
+            reasoning += data.delta?.thinking || "";
+            if (data.delta?.text || data.delta?.thinking)
+              arm(settings.idleSeconds, "idle");
+          }
+          if (data.type === "message_delta") {
+            finish = data.delta?.stop_reason || finish;
+            usage = { ...usage, ...data.usage };
+          }
+          if (data.type === "message_stop") done = true;
+          return;
+        }
+        if (node.protocol === "gemini") {
+          const parsed = nativeCompletion(data, "gemini");
+          const choice = parsed.choices?.[0];
+          content += choice?.message?.content || "";
+          reasoning += choice?.message?.reasoning_content || "";
+          if (choice?.message?.content || choice?.message?.reasoning_content)
+            arm(settings.idleSeconds, "idle");
+          if (choice?.finish_reason) finish = choice.finish_reason;
+          if (parsed.usage) usage = parsed.usage;
+          if (parsed.id) responseId = parsed.id;
+          return;
+        }
+        if (data.usage) usage = data.usage;
+        if (data.id) responseId = data.id;
+        const c = data.choices?.[0];
+        if (!c) return;
+        if (c.delta?.tool_calls?.length)
+          throw new Failure("Unexpected tool calls", {
+            category: "protocol",
+            phase: "parse",
+          });
+        const delta = c.delta || c.message || {};
+        if (
+          delta.content ||
+          delta.reasoning_content ||
+          delta.reasoning ||
+          delta.refusal ||
+          c.finish_reason
+        )
+          arm(settings.idleSeconds, "idle");
+        content += delta.content || "";
+        reasoning += delta.reasoning_content || delta.reasoning || "";
+        refusal += delta.refusal || "";
+        if (c.finish_reason) finish = c.finish_reason;
+      },
+    });
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > LIMIT)
+        throw new Failure("Response exceeds 8 MiB", {
+          category: "limit",
+          phase: "read",
+        });
+      const decoded = decoder.decode(chunk.value, { stream: true });
+      if (isSse) {
+        parser.feed(decoded);
+        if (done) break;
+      } else {
+        text += decoded;
+      }
+    }
+    if (isSse) parser.feed(decoder.decode());
+    else text += decoder.decode();
+    if (!response.ok) {
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = { message: text || response.statusText };
+      }
+      const error = providerFailure(data, response.status);
+      const retry = response.headers.get("retry-after");
+      if (retry) {
+        const seconds = Number(retry);
+        error.retryAt = Number.isFinite(seconds)
+          ? Date.now() + Math.max(0, seconds) * 1000
+          : Date.parse(retry);
+      }
+      throw error;
+    }
+    if (isSse) {
+      if (!done && !finish)
+        throw new Failure("Stream ended before completion", {
+          category: "interrupted",
+          phase: "stream",
+        });
+      return validate({
+        id: responseId || "failover",
+        object: "chat.completion",
+        model: node.model,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content,
+              ...(reasoning ? { reasoning_content: reasoning } : {}),
+              ...(refusal ? { refusal } : {}),
+            },
+            finish_reason: finish || "stop",
+          },
+        ],
+        ...(usage ? { usage } : {}),
+      });
+    }
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Failure("Invalid JSON response", {
+        category: "protocol",
+        phase: "parse",
+      });
+    }
+    return validate(nativeCompletion(data, node.protocol));
+  } catch (error) {
+    if (signal.aborted) throw signal.reason;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(total);
+    await reader?.cancel().catch(() => {});
+  }
+}

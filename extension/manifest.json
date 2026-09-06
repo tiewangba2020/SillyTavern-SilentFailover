@@ -1,0 +1,12 @@
+{
+  "display_name": "静默 API 故障转移",
+  "loading_order": 100,
+  "js": "dist/index.js",
+  "css": "style.css",
+  "author": "Silent Failover",
+  "version": "1.1.1",
+  "minimum_client_version": "1.18.0",
+  "homePage": "https://github.com/tiewangba2020/SillyTavern-SilentFailover",
+  "auto_update": false,
+  "hooks": { "disable": "onDisable", "delete": "onDisable" }
+}

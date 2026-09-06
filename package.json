@@ -1,0 +1,23 @@
+{
+  "name": "sillytavern-silent-failover",
+  "version": "1.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "install:st": "node tools/install.mjs"
+  },
+  "dependencies": {
+    "eventsource-parser": "3.0.6",
+    "yaml": "2.8.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2",
+    "esbuild": "0.25.12",
+    "express": "4.22.1",
+    "prettier": "^3.8.1",
+    "vitest": "3.2.4"
+  }
+}

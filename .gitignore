@@ -1,0 +1,17 @@
+node_modules/
+.verification/
+test-results/
+playwright-report/
+release/
+artifacts/
+*.log
+.publish/
+.env
+.env.*
+!.env.example
+docs/DELIVERY.md
+docs/VERIFICATION.md
+docs/REAL-API-VERIFICATION.md
+docs/NATIVE-LINK-VERIFICATION.md
+docs/LIVE-BROWSER-VERIFICATION-1.1.1.md
+docs/superpowers/
