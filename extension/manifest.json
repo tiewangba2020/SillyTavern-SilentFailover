@@ -4,7 +4,7 @@
   "js": "dist/index.js",
   "css": "style.css",
   "author": "Silent Failover",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "minimum_client_version": "1.18.0",
   "homePage": "https://github.com/tiewangba2020/SillyTavern-SilentFailover",
   "auto_update": false,

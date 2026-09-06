@@ -183,6 +183,7 @@
   max-height: calc(100dvh - 24px);
   overflow: auto;
 }
+#silent-failover-settings [hidden],
 .sf-task-panel [hidden],
 .sf-task-panel[hidden],
 .sf-task-notice[hidden] {
@@ -269,10 +270,39 @@
 }
 .sf-panel-actions {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 36px 36px;
+  grid-template-columns: minmax(0, 1fr) 36px;
   gap: 6px;
   padding-top: 12px;
   border-top: 1px solid #8884;
+}
+.sf-panel-target {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+}
+.sf-panel-switch {
+  width: 100%;
+  gap: 8px;
+  font-size: 13px;
+  background: #83cbb41a;
+  border-color: #83cbb455;
+  color: #a8dfca;
+}
+#silent-failover-settings .sf-model-picker {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+  min-width: 0;
+}
+#silent-failover-settings #sf-model-options {
+  width: 100%;
+  height: 190px;
+  min-width: 0;
+  font-size: 13px;
+}
+#silent-failover-settings #sf-model-options option {
+  padding: 5px 8px;
 }
 .sf-panel-select {
   width: 100%;
@@ -328,7 +358,10 @@
     min-width: 40px;
   }
   .sf-panel-actions {
-    grid-template-columns: minmax(0, 1fr) 40px 40px;
+    grid-template-columns: minmax(0, 1fr) 40px;
+  }
+  .sf-panel-switch {
+    width: 100%;
   }
   .sf-panel-select {
     height: 40px;

@@ -106,6 +106,7 @@ export function installAdapter(
       });
     const id = crypto.randomUUID();
     const saved = lifecycle.start?.();
+    const preferredNodeId = lifecycle.takePreferredNode?.(saved?.type);
     const controller = new AbortController();
     const originalSignal =
       init?.signal || (input instanceof Request ? input.signal : null);
@@ -121,7 +122,13 @@ export function installAdapter(
         try {
           job = await api(
             "/jobs",
-            { id, request: body, nativeFirst, generation: saved?.type },
+            {
+              id,
+              request: body,
+              nativeFirst,
+              generation: saved?.type,
+              preferredNodeId,
+            },
             controller.signal,
           );
           lastContact = Date.now();

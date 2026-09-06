@@ -36,6 +36,7 @@ export class Jobs {
       nativeNode = null,
       generation,
       testSettings,
+      preferredNodeId,
     } = {},
   ) {
     if (typeof id !== "string" || !id.length || id.length > 120)
@@ -65,6 +66,7 @@ export class Jobs {
       testNode,
       previewNode,
       testSettings,
+      preferredNodeId,
       manualSwitches: [],
       nativeNode,
       mode: testNode ? "node_test" : nativeNode ? "native_first" : "fallback",
@@ -119,6 +121,22 @@ export class Jobs {
           )
           .sort((a, b) => a.priority - b.priority);
         if (job.nativeNode && !job.testNode) nodes.unshift(job.nativeNode);
+        if (job.round === 0 && job.preferredNodeId && !job.testNode) {
+          let index = nodes.findIndex((n) => n.id === job.preferredNodeId);
+          // An enabled saved node may have been deduplicated against the native connection.
+          if (
+            index < 0 &&
+            job.nativeNode &&
+            config.nodes.some((n) => n.enabled && n.id === job.preferredNodeId)
+          )
+            index = nodes.indexOf(job.nativeNode);
+          if (index < 0) {
+            job.state = "invalid";
+            job.reason = "下次优先 API 已停用或不存在，请重新选择";
+            break;
+          }
+          nodes.unshift(...nodes.splice(index, 1));
+        }
         job.availableNodes = nodes.map(({ id, name, model }) => ({
           id,
           name,

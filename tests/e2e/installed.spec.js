@@ -64,7 +64,11 @@ async function setup(page, mode = "fallback", loop = false) {
   await page.locator("#extensions-settings-button .drawer-toggle").click();
   await page.evaluate(async () => {
     const c = SillyTavern.getContext();
-    Object.assign(c.chatCompletionSettings, { temp_openai: 1, openai_max_tokens: 1024, openai_max_context: 32768 });
+    Object.assign(c.chatCompletionSettings, {
+      temp_openai: 1,
+      openai_max_tokens: 1024,
+      openai_max_context: 32768,
+    });
     await c.selectCharacterById(0);
   });
   await page.waitForFunction(
@@ -87,10 +91,18 @@ async function generate(page, type = "normal") {
   }, type);
 }
 
-test("diagnostics distinguish quiet requests and export safe browser delivery events", async ({ page }) => {
+test("diagnostics distinguish quiet requests and export safe browser delivery events", async ({
+  page,
+}) => {
   await setup(page, "success");
   await generate(page, "quiet");
-  await expect.poll(async () => (await api(page, "/records"))[0]?.clientEvents?.some(e => e.stage === "response_prepared")).toBe(true);
+  await expect
+    .poll(async () =>
+      (await api(page, "/records"))[0]?.clientEvents?.some(
+        (e) => e.stage === "response_prepared",
+      ),
+    )
+    .toBe(true);
   const quiet = (await api(page, "/records"))[0];
   expect(quiet.generation).toBe("quiet");
   expect(quiet.attempts.at(-1).diagnostics.completion.textChars).toBe(9);
@@ -106,40 +118,98 @@ test("diagnostics distinguish quiet requests and export safe browser delivery ev
   const text = Buffer.concat(chunks).toString();
   const data = JSON.parse(text);
   expect(data.schema).toBe(2);
-  expect(data.browserEvents.some(e => e.stage === "generation_ended")).toBe(true);
+  expect(data.browserEvents.some((e) => e.stage === "generation_ended")).toBe(
+    true,
+  );
   expect(text).not.toContain("test-only-");
   expect(text).not.toContain("完整回复验证通过。");
 });
 
-test("one-click update reports restart and handles download failure in the settings panel", async ({ page }) => {
+test("one-click update reports restart and handles download failure in the settings panel", async ({
+  page,
+}) => {
   const root = await open(page);
-  await page.route("**/api/plugins/silent-failover/update", route => route.fulfill({ json: { state: "updating" } }));
-  await page.route("**/api/plugins/silent-failover/update/status", route => route.fulfill({ json: { state: "installed", installedVersion: "1.3.0", restartRequired: true } }));
+  await page.route("**/api/plugins/silent-failover/update", (route) =>
+    route.fulfill({ json: { state: "updating" } }),
+  );
+  await page.route("**/api/plugins/silent-failover/update/status", (route) =>
+    route.fulfill({
+      json: {
+        state: "installed",
+        installedVersion: "1.3.0",
+        restartRequired: true,
+      },
+    }),
+  );
   await root.getByRole("button", { name: "一键更新插件" }).click();
-  await expect(root.locator("[data-status]")).toContainText("请重启酒馆后台并刷新页面");
+  await expect(root.locator("[data-status]")).toContainText(
+    "请重启酒馆后台并刷新页面",
+  );
   await page.unroute("**/api/plugins/silent-failover/update/status");
-  await page.route("**/api/plugins/silent-failover/update/status", route => route.fulfill({ json: { state: "failed", error: "GitHub 下载失败（HTTP 503）" } }));
+  await page.route("**/api/plugins/silent-failover/update/status", (route) =>
+    route.fulfill({
+      json: { state: "failed", error: "GitHub 下载失败（HTTP 503）" },
+    }),
+  );
   await root.getByRole("button", { name: "一键更新插件" }).click();
-  await expect(root.locator("[data-status]")).toHaveText("GitHub 下载失败（HTTP 503）");
-  await expect(root.getByRole("button", { name: "一键更新插件" })).toBeEnabled();
+  await expect(root.locator("[data-status]")).toHaveText(
+    "GitHub 下载失败（HTTP 503）",
+  );
+  await expect(
+    root.getByRole("button", { name: "一键更新插件" }),
+  ).toBeEnabled();
 });
-test("real-world global sampling survives a quota failure and Claude fallback", async ({ page }) => {
+test("real-world global sampling survives a quota failure and Claude fallback", async ({
+  page,
+}) => {
   await setup(page, "parameters");
   const c = await api(page, "/config");
-  await api(page, "/config", { ...c, nodes: c.nodes.map(n => n.name === "B" ? { ...n, model: "claude-haiku-4-5-20251001", maxTokens: 4096 } : n) });
-  await page.evaluate(() => { const s=SillyTavern.getContext().chatCompletionSettings; s.temp_openai=1.3; s.openai_max_tokens=30000; s.openai_max_context=2000000; });
+  await api(page, "/config", {
+    ...c,
+    nodes: c.nodes.map((n) =>
+      n.name === "B"
+        ? { ...n, model: "claude-haiku-4-5-20251001", maxTokens: 4096 }
+        : n,
+    ),
+  });
+  await page.evaluate(() => {
+    const s = SillyTavern.getContext().chatCompletionSettings;
+    s.temp_openai = 1.3;
+    s.openai_max_tokens = 30000;
+    s.openai_max_context = 2000000;
+  });
   await page.locator("#send_textarea").fill("浏览器真实参数回归");
   await page.locator("#send_but").click();
-  await expect.poll(async () => (await api(page, "/records"))[0]?.state).toBe("succeeded");
-  await expect(page.locator("#chat .mes_text").last()).toContainText("完整回复验证通过");
-  const record=(await api(page, "/records"))[0];
-  expect(record.attempts.map(a=>a.node)).toEqual(["A", "B"]);
+  await expect
+    .poll(async () => (await api(page, "/records"))[0]?.state)
+    .toBe("succeeded");
+  await expect(page.locator("#chat .mes_text").last()).toContainText(
+    "完整回复验证通过",
+  );
+  const record = (await api(page, "/records"))[0];
+  expect(record.attempts.map((a) => a.node)).toEqual(["A", "B"]);
   expect(record.attempts[0].category).toBe("quota");
-  expect(record.attempts[1].adjustments.map(a=>a.parameter)).toEqual(["temperature", "max_tokens"]);
-  const calls=await (await page.request.get("http://127.0.0.1:9107/calls")).json();
-  expect(calls.calls[1].body).toMatchObject({temperature:1,max_tokens:4096});
-  expect(await page.evaluate(()=>SillyTavern.getContext().chatCompletionSettings.temp_openai)).toBe(1.3);
-  expect(await page.evaluate(()=>SillyTavern.getContext().chatCompletionSettings.openai_max_tokens)).toBe(30000);
+  expect(record.attempts[1].adjustments.map((a) => a.parameter)).toEqual([
+    "temperature",
+    "max_tokens",
+  ]);
+  const calls = await (
+    await page.request.get("http://127.0.0.1:9107/calls")
+  ).json();
+  expect(calls.calls[1].body).toMatchObject({
+    temperature: 1,
+    max_tokens: 4096,
+  });
+  expect(
+    await page.evaluate(
+      () => SillyTavern.getContext().chatCompletionSettings.temp_openai,
+    ),
+  ).toBe(1.3);
+  expect(
+    await page.evaluate(
+      () => SillyTavern.getContext().chatCompletionSettings.openai_max_tokens,
+    ),
+  ).toBe(30000);
   await expect(page.locator("#toast-container .toast-error")).toHaveCount(0);
 });
 test("installed extension can add/edit/reorder nodes and persists on reload", async ({
@@ -453,21 +523,39 @@ test("UI edits and priority changes persist only after explicit save", async ({
   await expect.poll(async () => (await api(page, "/config")).loop).toBe(true);
 });
 
-test("draft model lookup and connectivity test work before saving and can be cancelled", async ({ page }) => {
-  await page.request.post("http://127.0.0.1:9107/control", { data: { mode: "success" } });
+test("draft model lookup and connectivity test work before saving and can be cancelled", async ({
+  page,
+}) => {
+  await page.request.post("http://127.0.0.1:9107/control", {
+    data: { mode: "success" },
+  });
   const root = await open(page);
   const before = await api(page, "/config");
   await root.getByRole("button", { name: "新增节点", exact: true }).click();
   await root.getByLabel("名称", { exact: true }).fill("Draft test");
-  await root.getByLabel("API 地址", { exact: true }).fill("http://127.0.0.1:9107/C/v1");
+  await root
+    .getByLabel("API 地址", { exact: true })
+    .fill("http://127.0.0.1:9107/C/v1");
   await root.getByRole("button", { name: "获取模型列表", exact: true }).click();
   await expect(root.locator("#sf-model-options option")).toHaveCount(2);
   await root.getByLabel("模型 ID", { exact: true }).fill("mock-C");
-  await root.getByRole("button", { name: "测试当前节点（发送一次 API 请求）", exact: true }).click();
+  await root
+    .getByRole("button", {
+      name: "测试当前节点（发送一次 API 请求）",
+      exact: true,
+    })
+    .click();
   await expect(root.locator("[data-test]")).toContainText("测试成功");
   expect((await api(page, "/config")).nodes).toEqual(before.nodes);
-  await page.request.post("http://127.0.0.1:9107/control", { data: { mode: "slow" } });
-  await root.getByRole("button", { name: "测试当前节点（发送一次 API 请求）", exact: true }).click();
+  await page.request.post("http://127.0.0.1:9107/control", {
+    data: { mode: "slow" },
+  });
+  await root
+    .getByRole("button", {
+      name: "测试当前节点（发送一次 API 请求）",
+      exact: true,
+    })
+    .click();
   await expect(root.locator("[data-test]")).toContainText("测试中");
   await root.getByRole("button", { name: "停止测试", exact: true }).click();
   await expect(root.locator("[data-test]")).toContainText("测试已停止");
@@ -475,7 +563,148 @@ test("draft model lookup and connectivity test work before saving and can be can
   await expect(root.locator("[data-dirty]")).toHaveText("已保存");
 });
 
-test("floating panel switches an active API, stops generation and fits mobile", async ({ page }) => {
+test("patient mode hides timeouts and limited mode retains saved values", async ({
+  page,
+}) => {
+  const root = await open(page);
+  const c = await api(page, "/config");
+  await api(page, "/config", { ...c, waitMode: "patient", headerSeconds: 999 });
+  await root.getByRole("button", { name: "刷新配置", exact: true }).click();
+  const timeouts = root.locator("[data-advanced]").locator("..");
+  await expect(timeouts).toBeHidden();
+  await root.getByLabel("等待策略", { exact: true }).selectOption("limited");
+  await expect(timeouts).toBeVisible();
+  await timeouts.locator("summary").click();
+  await expect(
+    root.getByLabel("响应头超时（秒，0 关闭）", { exact: true }),
+  ).toHaveValue("999");
+  await root.getByLabel("等待策略", { exact: true }).selectOption("patient");
+  await expect(timeouts).toBeHidden();
+  await root.getByRole("button", { name: "保存设置", exact: true }).click();
+  expect((await api(page, "/config")).headerSeconds).toBe(999);
+});
+
+test("model picker shows all eight models independently of the current model and discards stale lookups", async ({
+  page,
+}) => {
+  const root = await open(page);
+  const c = await api(page, "/config");
+  const ids = [
+    "opus-4-6",
+    "opus-4-6-thinking",
+    "opus-4-7",
+    "opus-4-7-thinking",
+    "opus-4-8",
+    "opus-4-8-thinking",
+    "opus-5",
+    "opus-5-thinking",
+  ];
+  let releaseResponse;
+  await page.route("**/api/plugins/silent-failover/models", async (route) => {
+    if (releaseResponse)
+      await new Promise((resolve) => {
+        releaseResponse = resolve;
+      });
+    await route.fulfill({ json: { models: ids, truncated: false } });
+  });
+  await root.getByRole("button", { name: "新增节点", exact: true }).click();
+  await root.getByLabel("模型 ID", { exact: true }).fill(ids[0]);
+  await root.getByRole("button", { name: "获取模型列表", exact: true }).click();
+  await expect(root.locator("#sf-model-options option")).toHaveCount(8);
+  await expect(root.getByLabel("搜索可用模型", { exact: true })).toHaveValue(
+    "",
+  );
+  await root.getByLabel("搜索可用模型", { exact: true }).fill("thinking");
+  await expect(root.locator("#sf-model-options option")).toHaveCount(4);
+  await root
+    .getByLabel("可用模型", { exact: true })
+    .selectOption("opus-5-thinking");
+  await expect(root.getByLabel("模型 ID", { exact: true })).toHaveValue(
+    "opus-5-thinking",
+  );
+  await root.getByLabel("搜索可用模型", { exact: true }).fill("");
+  await expect(root.locator("#sf-model-options option")).toHaveCount(8);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await root
+      .locator(".sf-model-picker")
+      .evaluate((e) => e.scrollWidth <= e.clientWidth + 1),
+  ).toBe(true);
+  releaseResponse = true;
+  const requested = page.waitForRequest(
+    "**/api/plugins/silent-failover/models",
+  );
+  await root.getByRole("button", { name: "获取模型列表", exact: true }).click();
+  await requested;
+  await root
+    .getByLabel("API 地址", { exact: true })
+    .fill("https://changed.example/v1");
+  const received = page.waitForResponse(
+    "**/api/plugins/silent-failover/models",
+  );
+  releaseResponse();
+  await received;
+  await expect(root.locator(".sf-model-picker")).toBeHidden();
+  await expect(root.locator("#sf-model-options option")).toHaveCount(0);
+  expect((await api(page, "/config")).nodes).toEqual(c.nodes);
+});
+
+test("idle API preference applies once to normal generation and survives quiet tasks without saving priorities", async ({
+  page,
+}) => {
+  await setup(page, "success");
+  const c = await api(page, "/config");
+  await api(page, "/config", { ...c, floatingWindow: true });
+  await page.locator("#extensions-settings-button .drawer-toggle").click();
+  await page.getByRole("button", { name: "刷新配置", exact: true }).click();
+  await page.locator("#extensions-settings-button .drawer-toggle").click();
+  const panel = page.locator(".sf-task-panel");
+  await expect(panel.getByLabel("切换到 API", { exact: true })).toBeEnabled();
+  await panel
+    .getByLabel("切换到 API", { exact: true })
+    .selectOption(c.nodes.find((n) => n.name === "C").id);
+  await panel
+    .getByRole("button", { name: "应用于下次生成", exact: true })
+    .click();
+  await expect(panel.locator(".sf-panel-node")).toHaveText("C");
+  await generate(page, "quiet");
+  await page.locator("#send_textarea").fill("下次 API 预选验证");
+  await page.locator("#send_but").click();
+  await expect
+    .poll(
+      async () =>
+        (await api(page, "/records")).find((j) => j.generation !== "quiet")
+          ?.state,
+    )
+    .toBe("succeeded");
+  const job = (await api(page, "/records")).find(
+    (j) => j.generation !== "quiet",
+  );
+  expect(job.attempts.map((a) => a.node)).toEqual(["C"]);
+  await expect(page.locator("#chat .mes").last()).toContainText(
+    "完整回复验证通过",
+  );
+  await expect(panel.getByLabel("切换到 API", { exact: true })).toHaveValue("");
+  await page.locator("#send_textarea").fill("恢复默认优先级验证");
+  await page.locator("#send_but").click();
+  await expect
+    .poll(
+      async () =>
+        (await api(page, "/records")).filter(
+          (j) => j.generation !== "quiet" && j.state === "succeeded",
+        ).length,
+    )
+    .toBe(2);
+  expect((await api(page, "/records"))[0].attempts.map((a) => a.node)).toEqual([
+    "A",
+    "B",
+  ]);
+  expect((await api(page, "/config")).nodes).toEqual(c.nodes);
+});
+
+test("floating panel switches an active API, stops generation and fits mobile", async ({
+  page,
+}) => {
   await setup(page, "manual", true);
   let c = await api(page, "/config");
   await api(page, "/config", { ...c, floatingWindow: true });
@@ -484,41 +713,63 @@ test("floating panel switches an active API, stops generation and fits mobile", 
   await page.locator("#extensions-settings-button .drawer-toggle").click();
   await page.locator("#send_textarea").fill("手动切换完整回复验证");
   await page.locator("#send_but").click();
-  await expect.poll(async () => (await api(page, "/records"))[0]?.state).toBe("running");
+  await expect
+    .poll(async () => (await api(page, "/records"))[0]?.state)
+    .toBe("running");
   const job = (await api(page, "/records"))[0];
   const panel = page.locator(".sf-task-panel");
   await expect(panel).toBeVisible();
   await expect(panel.locator(".sf-panel-node")).toHaveText("A");
-  await panel.getByLabel("切换到 API", { exact: true }).selectOption(c.nodes.find(n => n.name === "C").id);
+  await panel
+    .getByLabel("切换到 API", { exact: true })
+    .selectOption(c.nodes.find((n) => n.name === "C").id);
   await panel.getByRole("button", { name: "切换 API", exact: true }).click();
-  await expect.poll(async () => (await api(page, "/jobs/" + job.id)).state).toBe("succeeded");
+  await expect
+    .poll(async () => (await api(page, "/jobs/" + job.id)).state)
+    .toBe("succeeded");
   await expect(panel.locator(".sf-panel-node")).toHaveText("C");
-  await expect(page.locator("#chat .mes").last()).toContainText("完整回复验证通过");
+  await expect(page.locator("#chat .mes").last()).toContainText(
+    "完整回复验证通过",
+  );
   await page.screenshot({ path: "artifacts/floating-desktop.png" });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: "artifacts/floating-mobile.png" });
-  expect(await panel.evaluate(e => e.scrollWidth <= e.clientWidth + 1)).toBe(true);
+  expect(await panel.evaluate((e) => e.scrollWidth <= e.clientWidth + 1)).toBe(
+    true,
+  );
   const bounds = await panel.boundingBox();
   expect(bounds.y).toBeGreaterThanOrEqual(0);
   expect(bounds.y + bounds.height).toBeLessThanOrEqual(844);
   await panel.getByRole("button", { name: "收起悬浮窗" }).click();
   await expect(panel.locator(".sf-panel-body")).toBeHidden();
   await panel.getByRole("button", { name: "展开悬浮窗" }).click();
-  const next = await api(page, "/jobs", { id: crypto.randomUUID(), request: { messages: [{ role: "user", content: "stop task" }] } });
+  const next = await api(page, "/jobs", {
+    id: crypto.randomUUID(),
+    request: { messages: [{ role: "user", content: "stop task" }] },
+  });
   await expect(panel.getByRole("button", { name: "停止生成" })).toBeEnabled();
   await panel.getByRole("button", { name: "停止生成" }).click();
-  await expect.poll(async () => (await api(page, "/jobs/" + next.id)).state).toBe("cancelled");
+  await expect
+    .poll(async () => (await api(page, "/jobs/" + next.id)).state)
+    .toBe("cancelled");
 });
 
-test("saved round limit ends retries and final-failure mode shows one notice", async ({ page }) => {
+test("saved round limit ends retries and final-failure mode shows one notice", async ({
+  page,
+}) => {
   await setup(page, "all-fail", true);
   await page.locator("#extensions-settings-button .drawer-toggle").click();
   const root = page.locator("#silent-failover-settings");
   await root.getByLabel("总轮次上限（0 不限）").fill("2");
   await root.getByLabel("提示方式", { exact: true }).selectOption("failure");
   await root.getByRole("button", { name: "保存设置", exact: true }).click();
-  const job = await api(page, "/jobs", { id: crypto.randomUUID(), request: { messages: [{ role: "user", content: "round test" }] } });
-  await expect.poll(async () => (await api(page, "/jobs/" + job.id)).state).toBe("exhausted");
+  const job = await api(page, "/jobs", {
+    id: crypto.randomUUID(),
+    request: { messages: [{ role: "user", content: "round test" }] },
+  });
+  await expect
+    .poll(async () => (await api(page, "/jobs/" + job.id)).state)
+    .toBe("exhausted");
   expect((await api(page, "/jobs/" + job.id)).attemptCount).toBe(6);
   await expect(page.locator(".sf-task-notice")).toBeVisible();
   await expect(page.locator(".sf-task-notice")).toContainText("本次生成未成功");

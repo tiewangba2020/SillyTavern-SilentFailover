@@ -82,6 +82,7 @@ function installAdapter(context, onLocalRecord = () => {
       });
     const id = crypto.randomUUID();
     const saved = lifecycle.start?.();
+    const preferredNodeId = lifecycle.takePreferredNode?.(saved?.type);
     const controller = new AbortController();
     const originalSignal = init?.signal || (input instanceof Request ? input.signal : null);
     const abort = () => controller.abort("client_aborted");
@@ -96,7 +97,13 @@ function installAdapter(context, onLocalRecord = () => {
         try {
           job = await api(
             "/jobs",
-            { id, request: body, nativeFirst, generation: saved?.type },
+            {
+              id,
+              request: body,
+              nativeFirst,
+              generation: saved?.type,
+              preferredNodeId
+            },
             controller.signal
           );
           lastContact = Date.now();
@@ -260,7 +267,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.3.1";
+var VERSION = "1.3.2";
 
 // extension/panel.js
 var make = (tag, cls, text) => {
@@ -285,7 +292,7 @@ function createTaskPanel(api, openRecords) {
   const title = make("strong", "", "API\u8FD8\u6CA1\u6302");
   header.append(make("i", "fa-solid fa-shuffle"), title);
   const body = make("div", "sf-panel-body");
-  let hidden = false, collapsed = false, selectedId, config2, records = [], lastConfigVisible = false;
+  let hidden = false, collapsed = false, selectedId, preferredNodeId = "", chooserContext, config2, records = [], lastConfigVisible = false;
   const collapse = icon("minus", "\u6536\u8D77\u60AC\u6D6E\u7A97", () => {
     collapsed = !collapsed;
     body.hidden = collapsed;
@@ -314,33 +321,49 @@ function createTaskPanel(api, openRecords) {
   const stats = make("div", "sf-panel-stats");
   const choose = make("select", "sf-panel-select");
   choose.setAttribute("aria-label", "\u5207\u6362\u5230 API");
+  const targetLabel = make("label", "sf-panel-target");
+  const targetText = make("span", "", "\u4E0B\u6B21\u4F18\u5148 API");
+  targetLabel.append(targetText, choose);
   const actions = make("div", "sf-panel-actions");
-  let commandBusy = false;
+  let commandBusy = false, commandError = "";
   const command = async (suffix, data) => {
     if (!selectedId || commandBusy) return;
     commandBusy = true;
+    commandError = "";
     switchButton.disabled = stop.disabled = true;
     try {
       await api(`/jobs/${selectedId}/${suffix}`, data);
       status.textContent = suffix === "switch" ? "\u6B63\u5728\u5207\u6362\u8282\u70B9" : "\u6B63\u5728\u505C\u6B62\u751F\u6210";
     } catch (e) {
-      status.textContent = e.message;
+      commandError = e.message;
     } finally {
       commandBusy = false;
+      render2();
     }
   };
-  const switchButton = icon(
-    "right-left",
-    "\u5207\u6362 API",
-    () => void command("switch", { nodeId: choose.value })
-  );
+  const switchButton = icon("right-left", "\u5207\u6362 API", () => {
+    if (panel2.dataset.state === "running" || panel2.dataset.state === "waiting") {
+      void command("switch", { nodeId: choose.value });
+    } else {
+      preferredNodeId = choose.value;
+      render2();
+    }
+  });
+  switchButton.classList.add("sf-panel-switch");
+  const switchText = make("span", "", "\u5207\u6362 API");
+  switchButton.append(switchText);
+  choose.onchange = () => {
+    commandError = "";
+    choose.title = choose.selectedOptions[0]?.textContent || "";
+    render2();
+  };
   const stop = icon(
     "stop",
     "\u505C\u6B62\u751F\u6210",
     () => void command("cancel", { reason: "panel_stop" })
   );
   stop.classList.add("sf-panel-stop");
-  actions.append(choose, switchButton, stop);
+  actions.append(targetLabel, switchButton, stop);
   body.append(tasks, status, node, model, stats, actions);
   panel2.append(header, body);
   document.body.append(panel2);
@@ -420,6 +443,10 @@ function createTaskPanel(api, openRecords) {
     tasks.hidden = active.length < 2;
     const a = job?.attempts?.at(-1);
     const running = !!job && ["running", "waiting"].includes(job.state);
+    const savedNodes = (config2?.nodes || []).filter((n) => n.enabled).sort((a2, b) => a2.priority - b.priority);
+    if (preferredNodeId && !savedNodes.some((n) => n.id === preferredNodeId))
+      preferredNodeId = "";
+    const preferred = savedNodes.find((n) => n.id === preferredNodeId);
     panel2.dataset.state = job?.state || "idle";
     status.textContent = !job ? "\u6682\u65E0\u751F\u6210\u4EFB\u52A1" : {
       succeeded: "\u4E0A\u6E38\u5DF2\u5B8C\u6210",
@@ -431,14 +458,36 @@ function createTaskPanel(api, openRecords) {
     node.textContent = a?.node || "\u5C31\u7EEA";
     model.textContent = a?.model || "";
     stats.textContent = job ? `\u7B2C ${job.round}${job.maxRounds ? " / " + job.maxRounds : ""} \u8F6E  \xB7  ${Math.max(0, Math.floor(((job.ended || Date.now()) - job.started) / 1e3))} \u79D2  \xB7  ${job.attemptCount} \u6B21\u5C1D\u8BD5` : "";
+    if (!running && preferred) {
+      status.textContent = "\u4E0B\u6B21\u751F\u6210\u5DF2\u5C31\u7EEA";
+      node.textContent = preferred.name;
+      model.textContent = preferred.model;
+      stats.textContent = "\u4EC5\u4E0B\u4E00\u6B21\u751F\u6210\u4F18\u5148";
+    }
+    const nextContext = running ? job.id : "idle";
+    const defaultTarget = running ? job.availableNodes?.find((n) => n.id !== a?.nodeId)?.id || "" : preferredNodeId;
     fill(
       choose,
-      job?.availableNodes?.map((n) => [n.id, n.name]) || [],
-      choose.value
+      running ? job.availableNodes?.map((n) => [n.id, `${n.name} \xB7 ${n.model}`]) || [] : [
+        ["", "\u6309\u5DF2\u4FDD\u5B58\u7684\u4F18\u5148\u7EA7"],
+        ...savedNodes.map((n) => [n.id, `${n.name} \xB7 ${n.model}`])
+      ],
+      chooserContext === nextContext ? choose.value : defaultTarget
     );
-    choose.disabled = !running || commandBusy;
-    switchButton.disabled = !running || commandBusy || !choose.value;
+    if (chooserContext !== nextContext) {
+      choose.value = defaultTarget;
+      commandError = "";
+    }
+    chooserContext = nextContext;
+    choose.title = choose.selectedOptions[0]?.textContent || "";
+    targetText.textContent = running ? "\u672C\u6B21\u5207\u6362\u5230" : "\u4E0B\u6B21\u4F18\u5148 API";
+    switchText.textContent = running ? "\u5207\u6362 API" : "\u5E94\u7528\u4E8E\u4E0B\u6B21\u751F\u6210";
+    switchButton.title = switchText.textContent;
+    switchButton.setAttribute("aria-label", switchText.textContent);
+    choose.disabled = commandBusy || !config2?.enabled;
+    switchButton.disabled = commandBusy || !config2?.enabled || (running ? !choose.value || choose.value === a?.nodeId : choose.value === preferredNodeId);
     stop.disabled = !running || commandBusy;
+    if (commandError) status.textContent = commandError;
     panel2.hidden = !config2?.floatingWindow || hidden;
     clamp();
   }
@@ -472,6 +521,14 @@ function createTaskPanel(api, openRecords) {
   };
   window.addEventListener("resize", clamp);
   return {
+    takePreferredNode(generation) {
+      if (generation === "quiet") return void 0;
+      const id = preferredNodeId || void 0;
+      preferredNodeId = "";
+      chooserContext = void 0;
+      render2();
+      return id;
+    },
     update(nextConfig, nextRecords) {
       config2 = nextConfig;
       records = nextRecords;
@@ -749,31 +806,72 @@ function editor(node = {
     dirty = true;
   };
   editorRead = stage;
-  form.addEventListener("input", () => {
+  form.addEventListener("input", (e) => {
+    if (e.target.type === "search") return;
     dirty = true;
     markDirty();
   });
-  const models = el("datalist", { id: "sf-model-options" });
-  form.querySelector('[name="model"]').setAttribute("list", models.id);
-  form.append(models);
+  const modelInput = form.querySelector('[name="model"]');
+  const picker = el("div", { className: "sf-model-picker", hidden: true });
+  const search = el("input", {
+    type: "search",
+    className: "text_pole",
+    placeholder: "\u641C\u7D22\u53EF\u7528\u6A21\u578B"
+  });
+  search.setAttribute("aria-label", "\u641C\u7D22\u53EF\u7528\u6A21\u578B");
+  const models = el("select", {
+    id: "sf-model-options",
+    className: "text_pole",
+    size: 6
+  });
+  models.setAttribute("aria-label", "\u53EF\u7528\u6A21\u578B");
+  const count = el("span", { className: "sf-muted", role: "status" });
+  picker.append(search, count, models);
+  let availableModels = [], lookupRevision = 0;
+  const renderModels = () => {
+    const query = search.value.trim().toLowerCase();
+    const matches = availableModels.filter(
+      (id) => id.toLowerCase().includes(query)
+    );
+    models.replaceChildren(
+      ...matches.map((id) => el("option", { value: id, title: id }, id))
+    );
+    models.value = modelInput.value;
+    count.textContent = matches.length ? `\u663E\u793A ${matches.length} / ${availableModels.length} \u4E2A\u6A21\u578B` : "\u6CA1\u6709\u5339\u914D\u7684\u6A21\u578B";
+    models.hidden = !matches.length;
+  };
+  search.oninput = renderModels;
+  for (const input of [search, models])
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") event.preventDefault();
+    });
+  models.onchange = () => {
+    modelInput.value = models.value;
+    modelInput.dispatchEvent(new Event("input", { bubbles: true }));
+  };
   const modelStatus = el("p", { className: "sf-muted", role: "status" });
   const modelButton = button(
     "list",
     "\u83B7\u53D6\u6A21\u578B\u5217\u8868",
     () => void guarded(async () => {
       modelButton.disabled = true;
+      const revision = ++lookupRevision;
+      availableModels = [];
+      picker.hidden = true;
       models.replaceChildren();
       modelStatus.textContent = "\u6B63\u5728\u83B7\u53D6\u6A21\u578B\u2026";
       try {
         const result = await bridge.api("/models", { node: read() });
-        models.replaceChildren(
-          ...result.models.map((id) => el("option", { value: id }))
-        );
+        if (revision !== lookupRevision || !form.isConnected) return;
+        availableModels = result.models;
+        search.value = "";
+        renderModels();
+        picker.hidden = false;
         modelStatus.textContent = `\u5DF2\u83B7\u53D6 ${result.models.length} \u4E2A\u6A21\u578B${result.truncated ? "\uFF08\u5217\u8868\u5DF2\u622A\u65AD\uFF09" : ""}`;
       } catch (e) {
-        modelStatus.textContent = e.message;
+        if (revision === lookupRevision) modelStatus.textContent = e.message;
       } finally {
-        modelButton.disabled = false;
+        if (revision === lookupRevision) modelButton.disabled = false;
       }
     })
   );
@@ -783,6 +881,10 @@ function editor(node = {
     form.querySelector('[name="key"]')
   ])
     input.addEventListener("input", () => {
+      lookupRevision++;
+      availableModels = [];
+      picker.hidden = true;
+      modelButton.disabled = false;
       models.replaceChildren();
       modelStatus.textContent = "";
     });
@@ -794,7 +896,7 @@ function editor(node = {
       () => void runNodeTest(read())
     )
   );
-  form.append(modelStatus);
+  form.append(modelStatus, picker);
   form.onsubmit = (e) => {
     e.preventDefault();
     void guarded(async () => {
@@ -1095,6 +1197,7 @@ function render() {
     nodes.append(row);
   });
   const advanced = root.querySelector("[data-advanced]");
+  advanced.closest("details").hidden = config.waitMode !== "limited";
   advanced.replaceChildren();
   for (const [key, label, min, max] of [
     ["timeoutSeconds", "\u5355\u8282\u70B9\u603B\u8D85\u65F6\uFF08\u79D2\uFF0C0 \u5173\u95ED\uFF09", 0, 86400],
@@ -1536,7 +1639,8 @@ bridge = installAdapter(
       snapshot = null;
       return s;
     },
-    failed: restoreFailed
+    failed: restoreFailed,
+    takePreferredNode: (generation) => panel?.takePreferredNode(generation)
   }
 );
 ctx().eventSource.on(ctx().eventTypes.APP_READY, () => {

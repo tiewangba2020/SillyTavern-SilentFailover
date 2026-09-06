@@ -23,6 +23,8 @@ export function createTaskPanel(api, openRecords) {
   let hidden = false,
     collapsed = false,
     selectedId,
+    preferredNodeId = "",
+    chooserContext,
     config,
     records = [],
     lastConfigVisible = false;
@@ -54,34 +56,54 @@ export function createTaskPanel(api, openRecords) {
   const stats = make("div", "sf-panel-stats");
   const choose = make("select", "sf-panel-select");
   choose.setAttribute("aria-label", "切换到 API");
+  const targetLabel = make("label", "sf-panel-target");
+  const targetText = make("span", "", "下次优先 API");
+  targetLabel.append(targetText, choose);
   const actions = make("div", "sf-panel-actions");
-  let commandBusy = false;
+  let commandBusy = false,
+    commandError = "";
   const command = async (suffix, data) => {
     if (!selectedId || commandBusy) return;
     commandBusy = true;
+    commandError = "";
     switchButton.disabled = stop.disabled = true;
     try {
       await api(`/jobs/${selectedId}/${suffix}`, data);
       status.textContent =
         suffix === "switch" ? "正在切换节点" : "正在停止生成";
     } catch (e) {
-      status.textContent = e.message;
+      commandError = e.message;
     } finally {
       commandBusy = false;
+      render();
     }
   };
-  const switchButton = icon(
-    "right-left",
-    "切换 API",
-    () => void command("switch", { nodeId: choose.value }),
-  );
+  const switchButton = icon("right-left", "切换 API", () => {
+    if (
+      panel.dataset.state === "running" ||
+      panel.dataset.state === "waiting"
+    ) {
+      void command("switch", { nodeId: choose.value });
+    } else {
+      preferredNodeId = choose.value;
+      render();
+    }
+  });
+  switchButton.classList.add("sf-panel-switch");
+  const switchText = make("span", "", "切换 API");
+  switchButton.append(switchText);
+  choose.onchange = () => {
+    commandError = "";
+    choose.title = choose.selectedOptions[0]?.textContent || "";
+    render();
+  };
   const stop = icon(
     "stop",
     "停止生成",
     () => void command("cancel", { reason: "panel_stop" }),
   );
   stop.classList.add("sf-panel-stop");
-  actions.append(choose, switchButton, stop);
+  actions.append(targetLabel, switchButton, stop);
   body.append(tasks, status, node, model, stats, actions);
   panel.append(header, body);
   document.body.append(panel);
@@ -179,6 +201,12 @@ export function createTaskPanel(api, openRecords) {
     tasks.hidden = active.length < 2;
     const a = job?.attempts?.at(-1);
     const running = !!job && ["running", "waiting"].includes(job.state);
+    const savedNodes = (config?.nodes || [])
+      .filter((n) => n.enabled)
+      .sort((a, b) => a.priority - b.priority);
+    if (preferredNodeId && !savedNodes.some((n) => n.id === preferredNodeId))
+      preferredNodeId = "";
+    const preferred = savedNodes.find((n) => n.id === preferredNodeId);
     panel.dataset.state = job?.state || "idle";
     status.textContent = !job
       ? "暂无生成任务"
@@ -195,14 +223,45 @@ export function createTaskPanel(api, openRecords) {
     stats.textContent = job
       ? `第 ${job.round}${job.maxRounds ? " / " + job.maxRounds : ""} 轮  ·  ${Math.max(0, Math.floor(((job.ended || Date.now()) - job.started) / 1000))} 秒  ·  ${job.attemptCount} 次尝试`
       : "";
+    if (!running && preferred) {
+      status.textContent = "下次生成已就绪";
+      node.textContent = preferred.name;
+      model.textContent = preferred.model;
+      stats.textContent = "仅下一次生成优先";
+    }
+    const nextContext = running ? job.id : "idle";
+    const defaultTarget = running
+      ? job.availableNodes?.find((n) => n.id !== a?.nodeId)?.id || ""
+      : preferredNodeId;
     fill(
       choose,
-      job?.availableNodes?.map((n) => [n.id, n.name]) || [],
-      choose.value,
+      running
+        ? job.availableNodes?.map((n) => [n.id, `${n.name} · ${n.model}`]) || []
+        : [
+            ["", "按已保存的优先级"],
+            ...savedNodes.map((n) => [n.id, `${n.name} · ${n.model}`]),
+          ],
+      chooserContext === nextContext ? choose.value : defaultTarget,
     );
-    choose.disabled = !running || commandBusy;
-    switchButton.disabled = !running || commandBusy || !choose.value;
+    if (chooserContext !== nextContext) {
+      choose.value = defaultTarget;
+      commandError = "";
+    }
+    chooserContext = nextContext;
+    choose.title = choose.selectedOptions[0]?.textContent || "";
+    targetText.textContent = running ? "本次切换到" : "下次优先 API";
+    switchText.textContent = running ? "切换 API" : "应用于下次生成";
+    switchButton.title = switchText.textContent;
+    switchButton.setAttribute("aria-label", switchText.textContent);
+    choose.disabled = commandBusy || !config?.enabled;
+    switchButton.disabled =
+      commandBusy ||
+      !config?.enabled ||
+      (running
+        ? !choose.value || choose.value === a?.nodeId
+        : choose.value === preferredNodeId);
     stop.disabled = !running || commandBusy;
+    if (commandError) status.textContent = commandError;
     panel.hidden = !config?.floatingWindow || hidden;
     clamp();
   }
@@ -237,6 +296,14 @@ export function createTaskPanel(api, openRecords) {
   };
   window.addEventListener("resize", clamp);
   return {
+    takePreferredNode(generation) {
+      if (generation === "quiet") return undefined;
+      const id = preferredNodeId || undefined;
+      preferredNodeId = "";
+      chooserContext = undefined;
+      render();
+      return id;
+    },
     update(nextConfig, nextRecords) {
       config = nextConfig;
       records = nextRecords;

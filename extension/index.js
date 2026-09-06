@@ -265,13 +265,52 @@ function editor(
     dirty = true;
   };
   editorRead = stage;
-  form.addEventListener("input", () => {
+  form.addEventListener("input", (e) => {
+    if (e.target.type === "search") return;
     dirty = true;
     markDirty();
   });
-  const models = el("datalist", { id: "sf-model-options" });
-  form.querySelector('[name="model"]').setAttribute("list", models.id);
-  form.append(models);
+  const modelInput = form.querySelector('[name="model"]');
+  const picker = el("div", { className: "sf-model-picker", hidden: true });
+  const search = el("input", {
+    type: "search",
+    className: "text_pole",
+    placeholder: "搜索可用模型",
+  });
+  search.setAttribute("aria-label", "搜索可用模型");
+  const models = el("select", {
+    id: "sf-model-options",
+    className: "text_pole",
+    size: 6,
+  });
+  models.setAttribute("aria-label", "可用模型");
+  const count = el("span", { className: "sf-muted", role: "status" });
+  picker.append(search, count, models);
+  let availableModels = [],
+    lookupRevision = 0;
+  const renderModels = () => {
+    const query = search.value.trim().toLowerCase();
+    const matches = availableModels.filter((id) =>
+      id.toLowerCase().includes(query),
+    );
+    models.replaceChildren(
+      ...matches.map((id) => el("option", { value: id, title: id }, id)),
+    );
+    models.value = modelInput.value;
+    count.textContent = matches.length
+      ? `显示 ${matches.length} / ${availableModels.length} 个模型`
+      : "没有匹配的模型";
+    models.hidden = !matches.length;
+  };
+  search.oninput = renderModels;
+  for (const input of [search, models])
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") event.preventDefault();
+    });
+  models.onchange = () => {
+    modelInput.value = models.value;
+    modelInput.dispatchEvent(new Event("input", { bubbles: true }));
+  };
   const modelStatus = el("p", { className: "sf-muted", role: "status" });
   const modelButton = button(
     "list",
@@ -279,18 +318,23 @@ function editor(
     () =>
       void guarded(async () => {
         modelButton.disabled = true;
+        const revision = ++lookupRevision;
+        availableModels = [];
+        picker.hidden = true;
         models.replaceChildren();
         modelStatus.textContent = "正在获取模型…";
         try {
           const result = await bridge.api("/models", { node: read() });
-          models.replaceChildren(
-            ...result.models.map((id) => el("option", { value: id })),
-          );
+          if (revision !== lookupRevision || !form.isConnected) return;
+          availableModels = result.models;
+          search.value = "";
+          renderModels();
+          picker.hidden = false;
           modelStatus.textContent = `已获取 ${result.models.length} 个模型${result.truncated ? "（列表已截断）" : ""}`;
         } catch (e) {
-          modelStatus.textContent = e.message;
+          if (revision === lookupRevision) modelStatus.textContent = e.message;
         } finally {
-          modelButton.disabled = false;
+          if (revision === lookupRevision) modelButton.disabled = false;
         }
       }),
   );
@@ -300,6 +344,10 @@ function editor(
     form.querySelector('[name="key"]'),
   ])
     input.addEventListener("input", () => {
+      lookupRevision++;
+      availableModels = [];
+      picker.hidden = true;
+      modelButton.disabled = false;
       models.replaceChildren();
       modelStatus.textContent = "";
     });
@@ -311,7 +359,7 @@ function editor(
       () => void runNodeTest(read()),
     ),
   );
-  form.append(modelStatus);
+  form.append(modelStatus, picker);
   form.onsubmit = (e) => {
     e.preventDefault();
     void guarded(async () => {
@@ -642,6 +690,7 @@ function render() {
     nodes.append(row);
   });
   const advanced = root.querySelector("[data-advanced]");
+  advanced.closest("details").hidden = config.waitMode !== "limited";
   advanced.replaceChildren();
   for (const [key, label, min, max] of [
     ["timeoutSeconds", "单节点总超时（秒，0 关闭）", 0, 86400],
@@ -1106,6 +1155,7 @@ bridge = installAdapter(
       return s;
     },
     failed: restoreFailed,
+    takePreferredNode: (generation) => panel?.takePreferredNode(generation),
   },
 );
 ctx().eventSource.on(ctx().eventTypes.APP_READY, () => {

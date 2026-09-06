@@ -51,9 +51,76 @@ async function finish(jobs, id) {
   throw new Error("job did not finish");
 }
 describe("sequential jobs", () => {
+  test("a preferred saved node identical to the native connection executes only once", async () => {
+    const calls = [];
+    const { jobs, store } = fixture(async (n) => {
+      calls.push(n.id);
+      return ok;
+    });
+    const saved = store.config.nodes[2];
+    const nativeNode = { ...saved, id: "native", name: "Native" };
+    const done = await finish(
+      jobs,
+      jobs.create("native-alias", request, {
+        preferredNodeId: saved.id,
+        nativeNode,
+      }).id,
+    );
+    expect(done.state).toBe("succeeded");
+    expect(calls).toEqual(["native"]);
+    expect(done.availableNodes).toHaveLength(3);
+  });
+  test("one-shot preference changes only the first round and preserves saved priorities", async () => {
+    const order = [];
+    const { jobs, store } = fixture(async (n) => {
+      order.push(n.name);
+      throw new Error("unavailable");
+    });
+    store.save({ ...store.publicConfig(), loop: true, maxRounds: 2 });
+    const before = store.publicConfig();
+    const done = await finish(
+      jobs,
+      jobs.create("preferred", request, {
+        preferredNodeId: store.config.nodes[2].id,
+      }).id,
+    );
+    expect(done.state).toBe("exhausted");
+    expect(order.join("")).toBe("CABABC");
+    expect(store.publicConfig()).toEqual(before);
+    order.length = 0;
+    await finish(jobs, jobs.create("ordinary-after-preferred", request).id);
+    expect(order.join("")).toBe("ABCABC");
+  });
+  test("missing or disabled preferred nodes never submit a request to a different API", async () => {
+    const order = [];
+    const { jobs, store } = fixture(async (n) => {
+      order.push(n.name);
+      return ok;
+    });
+    const preferredNodeId = store.config.nodes[2].id;
+    store.save({
+      ...store.publicConfig(),
+      nodes: store
+        .publicConfig()
+        .nodes.map((n) => ({ ...n, enabled: n.id !== preferredNodeId })),
+    });
+    for (const [i, id] of [preferredNodeId, "removed"].entries()) {
+      const done = await finish(
+        jobs,
+        jobs.create("missing-preference-" + i, request, { preferredNodeId: id })
+          .id,
+      );
+      expect(done.state).toBe("invalid");
+      expect(done.reason).toContain("下次优先 API");
+    }
+    expect(order).toEqual([]);
+  });
   test("round cap three executes exactly ABCABCABC", async () => {
     const order = [];
-    const { jobs, store } = fixture(async n => { order.push(n.name); throw new Error("unavailable"); });
+    const { jobs, store } = fixture(async (n) => {
+      order.push(n.name);
+      throw new Error("unavailable");
+    });
     store.save({ ...store.publicConfig(), loop: true, maxRounds: 3 });
     const done = await finish(jobs, jobs.create("round-cap", request).id);
     expect(order.join("")).toBe("ABCABCABC");
@@ -64,7 +131,12 @@ describe("sequential jobs", () => {
     const order = [];
     const { jobs, store } = fixture(async (n, p, signal) => {
       order.push(n.name);
-      if (n.name === "A") await new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      if (n.name === "A")
+        await new Promise((resolve, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          }),
+        );
       return ok;
     });
     const task = jobs.create("manual-switch", request);

@@ -106,6 +106,7 @@ export async function init(router, options = {}) {
       res.json(
         req.failover.jobs.create(req.body.id, input, {
           generation: req.body.generation,
+          preferredNodeId: req.body.preferredNodeId,
           nativeNode: native
             ? nativeNode(input, req.user.directories, host)
             : null,
@@ -156,13 +157,11 @@ export async function init(router, options = {}) {
       );
     } catch (e) {
       if (!res.destroyed)
-        res
-          .status(e.status || 400)
-          .json({
-            error: e.status
-              ? `获取模型失败（HTTP ${e.status}），可手动填写模型 ID`
-              : "无法获取模型列表，请检查地址和网络，或手动填写模型 ID",
-          });
+        res.status(e.status || 400).json({
+          error: e.status
+            ? `获取模型失败（HTTP ${e.status}），可手动填写模型 ID`
+            : "无法获取模型列表，请检查地址和网络，或手动填写模型 ID",
+        });
     } finally {
       res.off("close", abort);
     }
