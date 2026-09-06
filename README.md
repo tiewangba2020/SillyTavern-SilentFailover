@@ -123,11 +123,13 @@ st_target="$HOME/SillyTavern"
 node -e 'const fs=require("node:fs"),p=require("node:path"),r=fs.realpathSync(process.argv[1]);const pkg=JSON.parse(fs.readFileSync(p.join(r,"package.json"),"utf8"));if(pkg.name!=="sillytavern"||!fs.statSync(p.join(r,"server.js")).isFile())throw Error("这不是酒馆根目录");console.log("已确认酒馆目录："+r);console.log("酒馆版本："+pkg.version)' "$st_target"
 ```
 
-看到“已确认酒馆目录”后，保持在同一个 Termux 会话中执行安装。**先停止这份酒馆和自动重启脚本**，再运行：
+如果已确认酒馆位于常见默认目录 `$HOME/SillyTavern`，**先停止这份酒馆和自动重启脚本**，再运行下面的命令。可以在 Termux 的任意目录执行，不依赖之前设置的变量：
 
 ```bash
-curl -fL https://raw.githubusercontent.com/tiewangba2020/SillyTavern-SilentFailover/main/tools/install.sh -o "$HOME/api-still-up-install.sh" && bash "$HOME/api-still-up-install.sh" --target "$st_target"
+curl -fL https://raw.githubusercontent.com/tiewangba2020/SillyTavern-SilentFailover/main/tools/install.sh -o "$HOME/api-still-up-install.sh" && bash "$HOME/api-still-up-install.sh" --target "$HOME/SillyTavern"
 ```
+
+如果核验出的目录不是 `$HOME/SillyTavern`，请将上述命令中 `--target` 后的路径替换为核验出的完整路径，并保留双引号。这里使用的是常见默认目录，不是自动搜索结果。不要填写尚未赋值的 `$st_target`，否则会报 `Missing --target path`。
 
 脚本会下载最新正式版，校验安装包，备份并安装两部分。不需要 root，不会替你更换酒馆启动器。安装成功后按原来的方式启动酒馆，再刷新浏览器。看见错误时先处理错误，不要忽略后继续启动；网络下载或校验失败时不会安装。
 
@@ -135,7 +137,7 @@ curl -fL https://raw.githubusercontent.com/tiewangba2020/SillyTavern-SilentFailo
 
 如果没有搜索结果，检查启动器的启动脚本或终端输出中是否指定了其他路径。通过 `proot-distro` 等方式在容器环境里运行酒馆的，需要先进入同一环境，再查找和安装。`$HOME` 搜索不会扫描其他 Android 应用的私有目录，也不会自动找到云端或容器里的酒馆。云端用户可在服务器面板的文件管理器中查找，或通过 SSH 在实际运行环境中执行同样的目录核验。
 
-已下载完整 ZIP 的用户也可以在 Termux 中解压，进入包含 `install.mjs` 的解压目录，执行 `node install.mjs --target "$st_target"`；这同样安装两部分，不需要再运行下载脚本。
+已下载完整 ZIP 的用户也可以在 Termux 中解压，进入包含 `install.mjs` 的解压目录，执行 `node install.mjs --target "$HOME/SillyTavern"`；非默认位置仍需替换目标路径。这同样安装两部分，不需要再运行下载脚本。
 
 ### 云服务器：直接运行 Node.js 的 Linux 部署
 
