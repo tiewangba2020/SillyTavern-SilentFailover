@@ -248,7 +248,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.4.0";
+var VERSION = "1.4.1";
 
 // extension/panel.js
 var make = (tag, cls, text) => {
@@ -257,12 +257,14 @@ var make = (tag, cls, text) => {
   if (text !== void 0) element.textContent = text;
   return element;
 };
-var icon = (name, title, action) => {
+var icon = (name, title, action, touchLabel) => {
   const b = make("button", "sf-panel-icon");
   b.type = "button";
   b.title = title;
   b.setAttribute("aria-label", title);
   b.append(make("i", `fa-solid fa-${name}`));
+  b.firstChild.setAttribute("aria-hidden", "true");
+  if (touchLabel) b.append(make("span", "sf-action-label", touchLabel));
   b.onclick = action;
   return b;
 };
@@ -273,21 +275,38 @@ function createTaskPanel(api, openRecords) {
   const title = make("strong", "", "API\u8FD8\u6CA1\u6302");
   header.append(make("i", "fa-solid fa-shuffle"), title);
   const body = make("div", "sf-panel-body");
-  let hidden = false, collapsed = false, selectedId, preferredNodeId = "", chooserContext, config2, records = [], lastConfigVisible = false;
-  const collapse = icon("minus", "\u6536\u8D77\u60AC\u6D6E\u7A97", () => {
-    collapsed = !collapsed;
-    body.hidden = collapsed;
-    collapse.title = collapsed ? "\u5C55\u5F00\u60AC\u6D6E\u7A97" : "\u6536\u8D77\u60AC\u6D6E\u7A97";
-    collapse.setAttribute("aria-label", collapse.title);
-    collapse.firstChild.className = `fa-solid fa-${collapsed ? "plus" : "minus"}`;
-    clamp();
-  });
+  let hidden = false, collapsed = false, suppressPointerClick = false, selectedId, preferredNodeId = "", chooserContext, config2, records = [], lastConfigVisible = false;
+  const collapse = icon(
+    "minus",
+    "\u6536\u8D77\u60AC\u6D6E\u7A97",
+    () => {
+      const previous = panel2.getBoundingClientRect();
+      collapsed = !collapsed;
+      panel2.dataset.collapsed = String(collapsed);
+      body.hidden = collapsed;
+      collapse.title = collapsed ? "\u5C55\u5F00\u60AC\u6D6E\u7A97" : "\u6536\u8D77\u60AC\u6D6E\u7A97";
+      collapse.setAttribute("aria-label", collapse.title);
+      collapse.firstChild.className = `fa-solid fa-${collapsed ? "plus" : "minus"}`;
+      collapse.querySelector(".sf-action-label").textContent = collapsed ? "\u5C55\u5F00" : "\u6536\u8D77";
+      collapse.setAttribute("aria-expanded", String(!collapsed));
+      panel2.style.left = `${previous.right - panel2.offsetWidth}px`;
+      clamp();
+    },
+    "\u6536\u8D77"
+  );
+  collapse.setAttribute("aria-expanded", "true");
+  collapse.classList.add("sf-panel-collapse");
   header.append(
     collapse,
-    icon("xmark", "\u5173\u95ED\u60AC\u6D6E\u7A97", () => {
-      hidden = true;
-      panel2.hidden = true;
-    })
+    icon(
+      "xmark",
+      "\u5173\u95ED\u60AC\u6D6E\u7A97",
+      () => {
+        hidden = true;
+        panel2.hidden = true;
+      },
+      "\u5173\u95ED"
+    )
   );
   const tasks = make("select", "sf-panel-select");
   tasks.setAttribute("aria-label", "\u5F53\u524D\u751F\u6210\u4EFB\u52A1");
@@ -341,7 +360,8 @@ function createTaskPanel(api, openRecords) {
   const stop = icon(
     "stop",
     "\u505C\u6B62\u751F\u6210",
-    () => void command("cancel", { reason: "panel_stop" })
+    () => void command("cancel", { reason: "panel_stop" }),
+    "\u505C\u6B62\u751F\u6210"
   );
   stop.classList.add("sf-panel-stop");
   actions.append(targetLabel, switchButton, stop);
@@ -355,9 +375,14 @@ function createTaskPanel(api, openRecords) {
   noticeText.onclick = openRecords;
   notice.append(
     noticeText,
-    icon("xmark", "\u5173\u95ED\u63D0\u793A", () => {
-      notice.hidden = true;
-    })
+    icon(
+      "xmark",
+      "\u5173\u95ED\u63D0\u793A",
+      () => {
+        notice.hidden = true;
+      },
+      "\u5173\u95ED"
+    )
   );
   document.body.append(notice);
   notice.hidden = true;
@@ -491,21 +516,53 @@ function createTaskPanel(api, openRecords) {
   }
   let drag;
   header.onpointerdown = (e) => {
-    if (e.target.closest("button") || e.button !== 0) return;
+    suppressPointerClick = false;
+    const bubble = collapsed && panel2.offsetWidth <= 60;
+    if (!bubble && e.target.closest("button") || e.button !== 0) return;
     const box = panel2.getBoundingClientRect();
-    drag = { x: e.clientX - box.left, y: e.clientY - box.top };
-    header.setPointerCapture(e.pointerId);
+    drag = {
+      x: e.clientX - box.left,
+      y: e.clientY - box.top,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+      bubble
+    };
+    (bubble ? collapse : header).setPointerCapture(e.pointerId);
   };
   header.onpointermove = (e) => {
     if (!drag) return;
+    if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 6)
+      return;
+    drag.moved = true;
     panel2.style.right = panel2.style.bottom = "auto";
     panel2.style.left = `${e.clientX - drag.x}px`;
     panel2.style.top = `${e.clientY - drag.y}px`;
     clamp();
   };
-  header.onpointerup = header.onpointercancel = () => {
+  header.onpointerup = header.onpointercancel = (e) => {
+    if (drag?.bubble && drag.moved) {
+      const box = panel2.getBoundingClientRect();
+      panel2.style.left = `${box.left + box.width / 2 < innerWidth / 2 ? 8 : innerWidth - box.width - 8}px`;
+      clamp();
+      suppressPointerClick = true;
+    } else if (drag?.bubble && e.type === "pointerup" && e.pointerType !== "mouse") {
+      collapse.click();
+      suppressPointerClick = true;
+    }
     drag = null;
   };
+  const resetPointerClick = () => {
+    suppressPointerClick = false;
+  };
+  const discardPointerClick = (event) => {
+    if (!suppressPointerClick || event.detail === 0) return;
+    suppressPointerClick = false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  document.addEventListener("pointerdown", resetPointerClick, true);
+  document.addEventListener("click", discardPointerClick, true);
   window.addEventListener("resize", clamp);
   return {
     takePreferredNode(generation) {
@@ -531,6 +588,8 @@ function createTaskPanel(api, openRecords) {
     dispose() {
       clearTimeout(noticeTimer);
       window.removeEventListener("resize", clamp);
+      document.removeEventListener("pointerdown", resetPointerClick, true);
+      document.removeEventListener("click", discardPointerClick, true);
       panel2.remove();
       notice.remove();
     }
@@ -584,7 +643,7 @@ var el = (tag, props = {}, text) => {
   if (text !== void 0) e.textContent = text;
   return e;
 };
-function button(icon2, label, fn) {
+function button(icon2, label, fn, touchLabel = label) {
   const b = el("button", {
     type: "button",
     className: "menu_button sf-icon",
@@ -592,6 +651,8 @@ function button(icon2, label, fn) {
   });
   b.setAttribute("aria-label", label);
   b.append(el("i", { className: `fa-solid fa-${icon2}` }));
+  b.firstChild.setAttribute("aria-hidden", "true");
+  b.append(el("span", { className: "sf-action-label" }, touchLabel));
   b.onclick = fn;
   return b;
 }
@@ -697,11 +758,14 @@ function editor(node = {
       placeholder: "https://api.example.com/v1"
     }),
     labelInput(
-      node.keySet ? "API Key\uFF08\u7559\u7A7A\u4FDD\u7559\uFF09" : "API Key",
+      node.key || node.keySet ? "API Key\uFF08\u7559\u7A7A\u4FDD\u7559\uFF09" : "API Key",
       "key",
       "",
       "password",
-      { autocomplete: "new-password" }
+      {
+        autocomplete: "new-password",
+        placeholder: node.key ? "\u5DF2\u586B\u5199\uFF0C\u4FDD\u5B58\u8BBE\u7F6E\u540E\u751F\u6548" : node.keySet ? "\u5DF2\u4FDD\u5B58\uFF0C\u7559\u7A7A\u4E0D\u66F4\u6362" : "\u586B\u5199 API Key"
+      }
     ),
     labelInput("\u4F18\u5148\u7EA7", "priority", node.priority, "number", {
       min: 0,
@@ -751,7 +815,8 @@ function editor(node = {
       })(),
       model: data.get("model"),
       protocol: data.get("protocol"),
-      key: data.get("key"),
+      // A staged Key has not reached the server yet; blank edits must retain it too.
+      key: data.get("key") || node.key || "",
       priority: Number(data.get("priority")),
       stream: streamInput.checked
     };
@@ -857,7 +922,8 @@ function editor(node = {
     button(
       "flask",
       "\u6D4B\u8BD5\u5F53\u524D\u8282\u70B9\uFF08\u53D1\u9001\u4E00\u6B21 API \u8BF7\u6C42\uFF09",
-      () => void runNodeTest(read())
+      () => void runNodeTest(read()),
+      "\u6D4B\u8BD5\u8FDE\u63A5"
     )
   );
   form.append(modelStatus, picker);
@@ -1125,7 +1191,11 @@ function render() {
         n.stream !== false ? "\u6D41\u5F0F\u8BF7\u6C42" : "\u975E\u6D41\u5F0F\u8BF7\u6C42"
       ),
       el("small", { className: "sf-muted" }, n.url),
-      el("small", {}, n.keyHint || "\u672A\u8BBE\u7F6E Key")
+      el(
+        "small",
+        {},
+        n.key ? "Key \u5DF2\u586B\u5199\uFF08\u5F85\u4FDD\u5B58\uFF09" : n.keySet ? `Key \u5DF2\u4FDD\u5B58${n.keyHint ? " \xB7 " + n.keyHint : ""}` : "\u672A\u8BBE\u7F6E Key"
+      )
     );
     const actions = el("div", { className: "sf-row-actions" });
     const move = (dir) => void guarded(async () => {
@@ -1136,19 +1206,20 @@ function render() {
         nodes: sorted.map((x, i) => ({ ...x, priority: i + 1 }))
       });
     });
-    const up = button("arrow-up", "\u4E0A\u79FB " + n.name, () => move(-1));
+    const up = button("arrow-up", "\u4E0A\u79FB " + n.name, () => move(-1), "\u4E0A\u79FB");
     up.disabled = index === 0;
-    const down = button("arrow-down", "\u4E0B\u79FB " + n.name, () => move(1));
+    const down = button("arrow-down", "\u4E0B\u79FB " + n.name, () => move(1), "\u4E0B\u79FB");
     down.disabled = index === sorted.length - 1;
     const test = button(
       "flask",
       "\u6D4B\u8BD5 " + n.name + "\uFF08\u53D1\u9001\u4E00\u6B21 API \u8BF7\u6C42\uFF09",
-      () => void runNodeTest(n)
+      () => void runNodeTest(n),
+      "\u6D4B\u8BD5"
     );
     actions.append(
       up,
       down,
-      button("pen", "\u7F16\u8F91 " + n.name, () => editor(n)),
+      button("pen", "\u7F16\u8F91 " + n.name, () => editor(n), "\u7F16\u8F91"),
       test,
       button(
         "trash",
@@ -1159,7 +1230,8 @@ function render() {
             await saveConfig({
               nodes: config.nodes.filter((x) => x.id !== n.id)
             });
-        })
+        }),
+        "\u5220\u9664"
       )
     );
     row.append(enabled, text, actions);
@@ -1262,6 +1334,8 @@ async function refreshRecords() {
           })
         )
       );
+    if (r.connectionNote)
+      detail.append(el("p", { className: "sf-muted" }, r.connectionNote));
     if (r.reason)
       detail.append(
         el(
@@ -1478,7 +1552,7 @@ async function boot() {
       }
     })
   );
-  saveButton.append(document.createTextNode(" \u4FDD\u5B58\u8BBE\u7F6E"));
+  saveButton.classList.add("sf-labeled-action");
   saveButton.classList.remove("sf-icon");
   actions.append(
     saveButton,
@@ -1490,12 +1564,17 @@ async function boot() {
       render();
       message("\u5DF2\u64A4\u9500\u672A\u4FDD\u5B58\u7684\u4FEE\u6539");
     }),
-    button("window-restore", "\u663E\u793A\u4EFB\u52A1\u60AC\u6D6E\u7A97", () => {
-      if (!config) return;
-      void saveConfig({ floatingWindow: true });
-      panel.update(config, []);
-      panel.show();
-    })
+    button(
+      "window-restore",
+      "\u663E\u793A\u4EFB\u52A1\u60AC\u6D6E\u7A97",
+      () => {
+        if (!config) return;
+        void saveConfig({ floatingWindow: true });
+        panel.update(config, []);
+        panel.show();
+      },
+      "\u60AC\u6D6E\u7A97"
+    )
   );
   const update = button(
     "download",

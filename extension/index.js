@@ -33,7 +33,7 @@ const el = (tag, props = {}, text) => {
   if (text !== undefined) e.textContent = text;
   return e;
 };
-function button(icon, label, fn) {
+function button(icon, label, fn, touchLabel = label) {
   const b = el("button", {
     type: "button",
     className: "menu_button sf-icon",
@@ -41,6 +41,8 @@ function button(icon, label, fn) {
   });
   b.setAttribute("aria-label", label);
   b.append(el("i", { className: `fa-solid fa-${icon}` }));
+  b.firstChild.setAttribute("aria-hidden", "true");
+  b.append(el("span", { className: "sf-action-label" }, touchLabel));
   b.onclick = fn;
   return b;
 }
@@ -159,11 +161,18 @@ function editor(
       placeholder: "https://api.example.com/v1",
     }),
     labelInput(
-      node.keySet ? "API Key（留空保留）" : "API Key",
+      node.key || node.keySet ? "API Key（留空保留）" : "API Key",
       "key",
       "",
       "password",
-      { autocomplete: "new-password" },
+      {
+        autocomplete: "new-password",
+        placeholder: node.key
+          ? "已填写，保存设置后生效"
+          : node.keySet
+            ? "已保存，留空不更换"
+            : "填写 API Key",
+      },
     ),
     labelInput("优先级", "priority", node.priority, "number", {
       min: 0,
@@ -213,7 +222,8 @@ function editor(
       })(),
       model: data.get("model"),
       protocol: data.get("protocol"),
-      key: data.get("key"),
+      // A staged Key has not reached the server yet; blank edits must retain it too.
+      key: data.get("key") || node.key || "",
       priority: Number(data.get("priority")),
       stream: streamInput.checked,
     };
@@ -324,6 +334,7 @@ function editor(
       "flask",
       "测试当前节点（发送一次 API 请求）",
       () => void runNodeTest(read()),
+      "测试连接",
     ),
   );
   form.append(modelStatus, picker);
@@ -613,7 +624,15 @@ function render() {
         n.stream !== false ? "流式请求" : "非流式请求",
       ),
       el("small", { className: "sf-muted" }, n.url),
-      el("small", {}, n.keyHint || "未设置 Key"),
+      el(
+        "small",
+        {},
+        n.key
+          ? "Key 已填写（待保存）"
+          : n.keySet
+            ? `Key 已保存${n.keyHint ? " · " + n.keyHint : ""}`
+            : "未设置 Key",
+      ),
     );
     const actions = el("div", { className: "sf-row-actions" });
     const move = (dir) =>
@@ -625,19 +644,20 @@ function render() {
           nodes: sorted.map((x, i) => ({ ...x, priority: i + 1 })),
         });
       });
-    const up = button("arrow-up", "上移 " + n.name, () => move(-1));
+    const up = button("arrow-up", "上移 " + n.name, () => move(-1), "上移");
     up.disabled = index === 0;
-    const down = button("arrow-down", "下移 " + n.name, () => move(1));
+    const down = button("arrow-down", "下移 " + n.name, () => move(1), "下移");
     down.disabled = index === sorted.length - 1;
     const test = button(
       "flask",
       "测试 " + n.name + "（发送一次 API 请求）",
       () => void runNodeTest(n),
+      "测试",
     );
     actions.append(
       up,
       down,
-      button("pen", "编辑 " + n.name, () => editor(n)),
+      button("pen", "编辑 " + n.name, () => editor(n), "编辑"),
       test,
       button(
         "trash",
@@ -650,6 +670,7 @@ function render() {
                 nodes: config.nodes.filter((x) => x.id !== n.id),
               });
           }),
+        "删除",
       ),
     );
     row.append(enabled, text, actions);
@@ -761,6 +782,8 @@ async function refreshRecords() {
             }),
         ),
       );
+    if (r.connectionNote)
+      detail.append(el("p", { className: "sf-muted" }, r.connectionNote));
     if (r.reason)
       detail.append(
         el(
@@ -986,7 +1009,7 @@ async function boot() {
         }
       }),
   );
-  saveButton.append(document.createTextNode(" 保存设置"));
+  saveButton.classList.add("sf-labeled-action");
   saveButton.classList.remove("sf-icon");
   actions.append(
     saveButton,
@@ -998,12 +1021,17 @@ async function boot() {
       render();
       message("已撤销未保存的修改");
     }),
-    button("window-restore", "显示任务悬浮窗", () => {
-      if (!config) return;
-      void saveConfig({ floatingWindow: true });
-      panel.update(config, []);
-      panel.show();
-    }),
+    button(
+      "window-restore",
+      "显示任务悬浮窗",
+      () => {
+        if (!config) return;
+        void saveConfig({ floatingWindow: true });
+        panel.update(config, []);
+        panel.show();
+      },
+      "悬浮窗",
+    ),
   );
   const update = button(
     "download",

@@ -18,8 +18,10 @@ const copy = (source, target) => {
 for (const name of [
   "extension", "server", "tests", "tools", "package.json", "package-lock.json",
   "README.md", "LICENSE", ".gitignore", "playwright.config.js", "vitest.config.js",
-  "docs/PUBLIC-VERIFICATION.md",
+  "docs/DEVELOPMENT.md",
 ]) copy(path.join(root, name), path.join(destination, name));
+const obsoleteReport = path.join(destination, "docs/PUBLIC-VERIFICATION.md");
+if (fs.existsSync(obsoleteReport)) fs.unlinkSync(obsoleteReport);
 for (const name of ["manifest.json", "style.css", "dist"])
   copy(path.join(root, "release/SillyTavern-SilentFailover", name), path.join(destination, name));
 console.log("Prepared public source and installable frontend at " + destination);

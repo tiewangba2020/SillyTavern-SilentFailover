@@ -51,6 +51,43 @@ async function finish(jobs, id) {
   throw new Error("job did not finish");
 }
 describe("sequential jobs", () => {
+  test.each([
+    "custom_include_body",
+    "custom_exclude_body",
+    "custom_include_headers",
+  ])(
+    "native-only %s does not block backups or leak into their requests",
+    async (field) => {
+      const { jobs, store } = fixture(async (node, payload) => {
+        expect(payload).toEqual(request);
+        expect(node.request).toBeUndefined();
+        return ok;
+      });
+      const input = { ...request, [field]: "private-native-value" };
+      const before = structuredClone(input);
+      const backup = await finish(jobs, jobs.create("backup", input).id);
+      expect(backup.state).toBe("succeeded");
+      expect(backup.attemptCount).toBe(1);
+      expect(backup.connectionNote).toContain("未传给备用节点");
+      expect(input).toEqual(before);
+      const nativeNode = {
+        ...store.config.nodes[0],
+        id: "native",
+        name: "Native",
+        protocol: "openai",
+        request: input,
+      };
+      const linked = await finish(
+        jobs,
+        jobs.create("native", input, { nativeNode }).id,
+      );
+      expect(linked.state).toBe("succeeded");
+      expect(linked.attempts.map((a) => a.node)).toEqual(["Native", "A"]);
+      expect(linked.attempts[0].category).toBe("configuration");
+      expect(nativeNode.unavailableReason).toBeUndefined();
+      expect(JSON.stringify(jobs.list())).not.toContain("private-native-value");
+    },
+  );
   test("a preferred saved node identical to the native connection executes only once", async () => {
     const calls = [];
     const { jobs, store } = fixture(async (n) => {

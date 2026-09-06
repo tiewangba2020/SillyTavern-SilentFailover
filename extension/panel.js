@@ -4,12 +4,14 @@ const make = (tag, cls, text) => {
   if (text !== undefined) element.textContent = text;
   return element;
 };
-const icon = (name, title, action) => {
+const icon = (name, title, action, touchLabel) => {
   const b = make("button", "sf-panel-icon");
   b.type = "button";
   b.title = title;
   b.setAttribute("aria-label", title);
   b.append(make("i", `fa-solid fa-${name}`));
+  b.firstChild.setAttribute("aria-hidden", "true");
+  if (touchLabel) b.append(make("span", "sf-action-label", touchLabel));
   b.onclick = action;
   return b;
 };
@@ -22,26 +24,46 @@ export function createTaskPanel(api, openRecords) {
   const body = make("div", "sf-panel-body");
   let hidden = false,
     collapsed = false,
+    suppressPointerClick = false,
     selectedId,
     preferredNodeId = "",
     chooserContext,
     config,
     records = [],
     lastConfigVisible = false;
-  const collapse = icon("minus", "收起悬浮窗", () => {
-    collapsed = !collapsed;
-    body.hidden = collapsed;
-    collapse.title = collapsed ? "展开悬浮窗" : "收起悬浮窗";
-    collapse.setAttribute("aria-label", collapse.title);
-    collapse.firstChild.className = `fa-solid fa-${collapsed ? "plus" : "minus"}`;
-    clamp();
-  });
+  const collapse = icon(
+    "minus",
+    "收起悬浮窗",
+    () => {
+      const previous = panel.getBoundingClientRect();
+      collapsed = !collapsed;
+      panel.dataset.collapsed = String(collapsed);
+      body.hidden = collapsed;
+      collapse.title = collapsed ? "展开悬浮窗" : "收起悬浮窗";
+      collapse.setAttribute("aria-label", collapse.title);
+      collapse.firstChild.className = `fa-solid fa-${collapsed ? "plus" : "minus"}`;
+      collapse.querySelector(".sf-action-label").textContent = collapsed
+        ? "展开"
+        : "收起";
+      collapse.setAttribute("aria-expanded", String(!collapsed));
+      panel.style.left = `${previous.right - panel.offsetWidth}px`;
+      clamp();
+    },
+    "收起",
+  );
+  collapse.setAttribute("aria-expanded", "true");
+  collapse.classList.add("sf-panel-collapse");
   header.append(
     collapse,
-    icon("xmark", "关闭悬浮窗", () => {
-      hidden = true;
-      panel.hidden = true;
-    }),
+    icon(
+      "xmark",
+      "关闭悬浮窗",
+      () => {
+        hidden = true;
+        panel.hidden = true;
+      },
+      "关闭",
+    ),
   );
   const tasks = make("select", "sf-panel-select");
   tasks.setAttribute("aria-label", "当前生成任务");
@@ -101,6 +123,7 @@ export function createTaskPanel(api, openRecords) {
     "stop",
     "停止生成",
     () => void command("cancel", { reason: "panel_stop" }),
+    "停止生成",
   );
   stop.classList.add("sf-panel-stop");
   actions.append(targetLabel, switchButton, stop);
@@ -114,9 +137,14 @@ export function createTaskPanel(api, openRecords) {
   noticeText.onclick = openRecords;
   notice.append(
     noticeText,
-    icon("xmark", "关闭提示", () => {
-      notice.hidden = true;
-    }),
+    icon(
+      "xmark",
+      "关闭提示",
+      () => {
+        notice.hidden = true;
+      },
+      "关闭",
+    ),
   );
   document.body.append(notice);
   notice.hidden = true;
@@ -287,21 +315,62 @@ export function createTaskPanel(api, openRecords) {
   }
   let drag;
   header.onpointerdown = (e) => {
-    if (e.target.closest("button") || e.button !== 0) return;
+    suppressPointerClick = false;
+    const bubble = collapsed && panel.offsetWidth <= 60;
+    if ((!bubble && e.target.closest("button")) || e.button !== 0) return;
     const box = panel.getBoundingClientRect();
-    drag = { x: e.clientX - box.left, y: e.clientY - box.top };
-    header.setPointerCapture(e.pointerId);
+    drag = {
+      x: e.clientX - box.left,
+      y: e.clientY - box.top,
+      startX: e.clientX,
+      startY: e.clientY,
+      moved: false,
+      bubble,
+    };
+    (bubble ? collapse : header).setPointerCapture(e.pointerId);
   };
   header.onpointermove = (e) => {
     if (!drag) return;
+    if (
+      !drag.moved &&
+      Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 6
+    )
+      return;
+    drag.moved = true;
     panel.style.right = panel.style.bottom = "auto";
     panel.style.left = `${e.clientX - drag.x}px`;
     panel.style.top = `${e.clientY - drag.y}px`;
     clamp();
   };
-  header.onpointerup = header.onpointercancel = () => {
+  header.onpointerup = header.onpointercancel = (e) => {
+    if (drag?.bubble && drag.moved) {
+      const box = panel.getBoundingClientRect();
+      panel.style.left = `${box.left + box.width / 2 < innerWidth / 2 ? 8 : innerWidth - box.width - 8}px`;
+      clamp();
+      suppressPointerClick = true;
+    } else if (
+      drag?.bubble &&
+      e.type === "pointerup" &&
+      e.pointerType !== "mouse"
+    ) {
+      // Browsers may suppress the first synthesized click after dragging a touch control.
+      collapse.click();
+      suppressPointerClick = true;
+    }
     drag = null;
   };
+  const resetPointerClick = () => {
+    suppressPointerClick = false;
+  };
+  const discardPointerClick = (event) => {
+    if (!suppressPointerClick || event.detail === 0) return;
+    // Expanding changes hit targets; a trailing touch click can otherwise hit Close.
+    suppressPointerClick = false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  document.addEventListener("pointerdown", resetPointerClick, true);
+  document.addEventListener("click", discardPointerClick, true);
   window.addEventListener("resize", clamp);
   return {
     takePreferredNode(generation) {
@@ -327,6 +396,8 @@ export function createTaskPanel(api, openRecords) {
     dispose() {
       clearTimeout(noticeTimer);
       window.removeEventListener("resize", clamp);
+      document.removeEventListener("pointerdown", resetPointerClick, true);
+      document.removeEventListener("click", discardPointerClick, true);
       panel.remove();
       notice.remove();
     },

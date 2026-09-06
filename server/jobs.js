@@ -50,6 +50,24 @@ export class Jobs {
       [...this.jobs.values()].filter((j) => !terminal.has(j.state)).length >= 4
     )
       throw new Error("同时运行的任务过多");
+    // These settings belong to the host connection, not to independently configured backups.
+    const customFields = [
+      "custom_include_body",
+      "custom_exclude_body",
+      "custom_include_headers",
+    ];
+    const hasCustomParameters = customFields.some((name) =>
+      typeof input?.[name] === "string"
+        ? input[name].trim()
+        : input?.[name] != null,
+    );
+    if (hasCustomParameters && nativeNode)
+      nativeNode = {
+        ...nativeNode,
+        unavailableReason:
+          nativeNode.unavailableReason ||
+          "原生连接包含暂不支持的自定义请求体或请求头，已跳过原生节点并尝试备用节点",
+      };
     const job = {
       id,
       logVersion: 2,
@@ -72,10 +90,18 @@ export class Jobs {
       manualSwitches: [],
       nativeNode,
       mode: testNode ? "node_test" : nativeNode ? "native_first" : "fallback",
+      ...(hasCustomParameters
+        ? {
+            connectionNote:
+              "酒馆自定义请求体、排除参数和请求头仅属于原生连接，未传给备用节点",
+          }
+        : {}),
     };
     this.jobs.set(id, job);
     try {
-      job.payload = normalizeRequest(input);
+      const sharedInput = { ...input };
+      for (const name of customFields) delete sharedInput[name];
+      job.payload = normalizeRequest(sharedInput);
     } catch (e) {
       job.state = "invalid";
       job.reason = e.message;
@@ -114,6 +140,7 @@ export class Jobs {
           .filter(
             (n) =>
               !job.nativeNode ||
+              job.nativeNode.unavailableReason ||
               n.url !== job.nativeNode.url ||
               n.model !== job.nativeNode.model ||
               n.key !== job.nativeNode.key ||

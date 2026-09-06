@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.4.0.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.4.1.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -50,6 +50,16 @@ node install.mjs --target "D:\SillyTavern"
 酒馆目录是包含 `server.js`、`package.json` 的目录；使用启动器时，不要把启动器的外层目录当成酒馆目录。
 
 安装器会同时安装前端和服务端、启用服务端插件，并备份已有插件和 `config.yaml`。安装包已包含运行依赖，无需执行 `npm install`。
+
+**完整 ZIP 安装包和下面的 Termux/Linux 安装脚本，都会一次安装前端 + 服务端。** 不需要分别下载安装两次；通过酒馆网页输入仓库 URL 的方式才只安装前端。
+
+### 先确认目标目录
+
+可以用电脑文件管理器、手机上的 MT 管理器等工具，找到你平时启动的那一份酒馆。进入同时包含 `server.js`、`package.json` 和 `public` 文件夹的位置，复制这个文件夹的完整路径，作为命令中 `--target` 的值。`package.json` 中的 `name` 应为 `sillytavern`。
+
+例如启动器中可能是 `启动器目录/SillyTavern/`，目标应选里面的 `SillyTavern`，不是启动器目录、`plugins` 目录、下载目录或插件安装包解压目录。若有多份酒馆或备份，选择实际启动的那一份。
+
+**文件管理器不是必需的。** Android 的应用隔离可能让 MT 等工具看不到 Termux 的私有目录；这不代表酒馆没安装，也不需要为此获取 root。直接在 Termux 内按下面的方法查找即可。如果你只是在手机浏览器中访问云端酒馆，安装目标在服务器上，不在手机里。
 
 ### 方法二：手动安装
 
@@ -87,13 +97,45 @@ pkg install curl unzip
 pkg install nodejs-lts
 ```
 
-确认酒馆在 `$HOME/SillyTavern`（目录中应有 `server.js` 和 `package.json`）；其他位置请修改 `--target` 后面的路径。执行：
+**不用文件管理器，怎样找到酒馆？**
+
+如果刚才是在酒馆目录运行启动命令，停止酒馆后先输入：
 
 ```bash
-curl -fL https://raw.githubusercontent.com/tiewangba2020/SillyTavern-SilentFailover/main/tools/install.sh -o "$HOME/api-still-up-install.sh" && bash "$HOME/api-still-up-install.sh" --target "$HOME/SillyTavern"
+pwd
+ls -l server.js package.json
+```
+
+`pwd` 显示当前完整路径；两个文件都存在时，再按下方方法核验。注意，启动脚本可能只在自己的子进程中进入酒馆目录，因此停止后显示的目录未必就是酒馆。
+
+不清楚安装位置时，在 Termux 中执行以下只读搜索，查找主目录里的候选入口文件：
+
+```bash
+find "$HOME" -type d \( -name node_modules -o -name .git -o -name backups -o -name .cache \) -prune -o -type f -name server.js -print
+```
+
+例如结果为 `/data/data/com.termux/files/home/SillyTavern/server.js`，候选目录就是去掉末尾 `/server.js` 后的路径。搜索会跳过依赖、Git 数据、备份及缓存目录；结果可能包含其他程序，不能看到 `server.js` 就直接安装。
+
+把候选目录填入下方第一行，核验它是不是酒馆。不要照抄一个与你的搜索结果不同的路径：
+
+```bash
+st_target="$HOME/SillyTavern"
+node -e 'const fs=require("node:fs"),p=require("node:path"),r=fs.realpathSync(process.argv[1]);const pkg=JSON.parse(fs.readFileSync(p.join(r,"package.json"),"utf8"));if(pkg.name!=="sillytavern"||!fs.statSync(p.join(r,"server.js")).isFile())throw Error("这不是酒馆根目录");console.log("已确认酒馆目录："+r);console.log("酒馆版本："+pkg.version)' "$st_target"
+```
+
+看到“已确认酒馆目录”后，保持在同一个 Termux 会话中执行安装。**先停止这份酒馆和自动重启脚本**，再运行：
+
+```bash
+curl -fL https://raw.githubusercontent.com/tiewangba2020/SillyTavern-SilentFailover/main/tools/install.sh -o "$HOME/api-still-up-install.sh" && bash "$HOME/api-still-up-install.sh" --target "$st_target"
 ```
 
 脚本会下载最新正式版，校验安装包，备份并安装两部分。不需要 root，不会替你更换酒馆启动器。安装成功后按原来的方式启动酒馆，再刷新浏览器。看见错误时先处理错误，不要忽略后继续启动；网络下载或校验失败时不会安装。
+
+**能不能自动找到位置直接安装？** 目前安装器需要明确的 `--target`，不会自动选择目录。上面的搜索命令能帮你找到候选位置，安装器会再次校验目标；如果搜到多个目录，需要根据自己的启动脚本确认正在使用哪一个，不能默认选第一个。
+
+如果没有搜索结果，检查启动器的启动脚本或终端输出中是否指定了其他路径。通过 `proot-distro` 等方式在容器环境里运行酒馆的，需要先进入同一环境，再查找和安装。`$HOME` 搜索不会扫描其他 Android 应用的私有目录，也不会自动找到云端或容器里的酒馆。云端用户可在服务器面板的文件管理器中查找，或通过 SSH 在实际运行环境中执行同样的目录核验。
+
+已下载完整 ZIP 的用户也可以在 Termux 中解压，进入包含 `install.mjs` 的解压目录，执行 `node install.mjs --target "$st_target"`；这同样安装两部分，不需要再运行下载脚本。
 
 ### 云服务器：直接运行 Node.js 的 Linux 部署
 
@@ -123,16 +165,16 @@ volumes:
 
 ```bash
 docker compose stop sillytavern
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.0/SillyTavern-SilentFailover-v1.4.0.zip -o SillyTavern-SilentFailover-v1.4.0.zip
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.0/SHA256SUMS-1.4.0 -o SHA256SUMS-1.4.0
-sha256sum --check --ignore-missing SHA256SUMS-1.4.0 && unzip SillyTavern-SilentFailover-v1.4.0.zip -d api-still-up-package
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.1/SillyTavern-SilentFailover-v1.4.1.zip -o SillyTavern-SilentFailover-v1.4.1.zip
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.1/SHA256SUMS-1.4.1 -o SHA256SUMS-1.4.1
+sha256sum --check --ignore-missing SHA256SUMS-1.4.1 && unzip SillyTavern-SilentFailover-v1.4.1.zip -d api-still-up-package
 docker compose run --rm --no-deps --entrypoint node -v "$PWD/api-still-up-package:/tmp/api-still-up-package:ro" sillytavern /tmp/api-still-up-package/install.mjs --target /home/node/app --config /home/node/app/config/config.yaml
 docker compose up -d sillytavern
 ```
 
 面板管理的容器可能使用不同服务名、路径、用户权限或命名卷，需要按实际部署调整。只有网页访问权的用户不能安装服务端，应由部署者操作。容器重建后若插件消失，应检查 `plugins` 和前端扩展目录是否挂载；不是反复重新装前端就能解决。
 
-安装器已测试根目录配置、Docker 风格的嵌套配置、覆盖升级和文件保留；Bash 下载脚本已在 Windows Git Bash 下测试安装与校验失败路径。目前没有 Android 真机或 Docker/Linux 运行环境实测，以上平台步骤不能视为所有第三方启动器的兼容保证。
+不同启动器、云面板的目录和权限可能不同，请以实际部署为准。Android、Linux 和 Docker 安装步骤尚未在对应运行环境实测。
 
 ## 第一次使用
 
@@ -166,7 +208,7 @@ docker compose up -d sillytavern
 | Claude 原生 | `https://api.anthropic.com/v1` | 完整 `/v1/messages` 地址 |
 | Gemini 原生 | `https://generativelanguage.googleapis.com` | 以 `/v1beta` 结尾的地址 |
 
-使用中转服务时，地址和协议以该服务的说明为准，不能仅凭模型名称判断协议。保存后的 Key 会显示为掩码；以后编辑节点时，Key 留空表示保留原密钥。
+使用中转服务时，地址和协议以该服务的说明为准，不能仅凭模型名称判断协议。填写并应用节点后显示“Key 已填写（待保存）”，点击顶部“保存设置”后显示“Key 已保存”和掩码。再次编辑时密钥框不回显，留空表示保留已填写或已保存的 Key。
 
 ### 2. 选择连接方式
 
@@ -210,6 +252,8 @@ docker compose up -d sillytavern
 开启“显示悬浮窗”后保存，或点击顶部窗口图标临时显示。悬浮窗支持拖动、收起和关闭，展示当前节点、模型、轮次、耗时及尝试次数。多个任务运行时可选择要操作的任务。生成中，在“本次切换到”列表选择 API，点击“切换 API”，会取消当前请求，丢弃未交付内容，用同一份聊天请求尝试所选节点；只影响当前任务，不改变保存的优先级。手动切换仍计入实际尝试次数，可以在同一轮产生额外尝试。
 
 空闲时，在“下次优先 API”中选择已保存且启用的节点，点击“应用于下次生成”。下一次生成会先请求这个节点，失败后继续按保存顺序尝试其他节点；后续轮次和下一条消息恢复原优先级。原生连接联动时也可临时让备用节点先尝试。选择“按已保存的优先级”并应用可取消预选。预选仅保留在当前页面，刷新后清除；后台静默生成和连通性测试不会消耗预选。
+
+手机和平板的常用操作会显示简短文字，不需要悬停查看提示。手机悬浮窗收起后变成圆形按钮，可拖动到屏幕两侧，松手贴边，轻点重新展开。
 
 悬浮窗、请求记录和酒馆原有的停止按钮都能停止生成，结束该任务的后续切换和重试。没有单独的“停止循环”按钮。取消客户端请求不保证供应商停止计算，已产生的费用可能仍会扣除。
 
@@ -264,6 +308,28 @@ docker compose up -d sillytavern
 
 打开请求记录，查看正在请求、等待重试还是全部失败。常见原因有密钥无效、余额不足、模型不可用、限流和超时。循环开启且轮次不限时，即使所有节点持续不可用，任务也会继续等待重试；耐心等待也可能长期收不到数据。可以停止生成，再检查配置。连接状态显示就绪，并不代表每个节点都能生成。
 
+### 提示“不支持酒馆自定义请求体和请求头”，轮次和尝试都是 0？
+
+在已发布的 1.4.0 及此前版本中，这表示请求在插件的参数检查阶段被拒绝，**还没有开始调用任何节点**，不是 API Key 无效，也不是等待超时。记录中的 `state: "invalid"` 表示未执行；`round: 0`、`attemptCount: 0` 和 `attempts: []` 表示没有进入第一轮、没有上游调用。因此这条任务本身没有向供应商发送生成请求；其他请求是否产生费用，需要单独核对。
+
+触发旧版检查的字段如下：
+
+| 酒馆的自定义参数 | 字段名 |
+| --- | --- |
+| 额外加入请求体的参数 | `custom_include_body` |
+| 从请求体排除的参数 | `custom_exclude_body` |
+| 额外请求头 | `custom_include_headers` |
+
+打开顶部插头图标的 **API 连接**，在 **聊天补全 → 自定义（OpenAI 兼容）** 的连接设置中找到“自定义参数 / Customize Parameters”（不同语言版本文案可能不同），检查上述三栏。若这些参数不再需要，先备份内容，再清空并保存对应连接配置后重新生成。不要清空普通的 API Key、地址或模型输入框。
+
+如果原生接口必须依赖这些额外参数或请求头，插件目前无法按这份自定义配置调用原生接口；可暂时关闭本插件，使用酒馆原有连接。插件不能把一家的自定义请求头和参数直接应用到其他供应商，也不能保证忽略后原生请求含义不变。
+
+这是 1.4.0 升级时可能遇到的兼容性回退：更早版本切换到插件专用连接时会暂时清空这些参数，1.4.0 恢复原连接后也恢复了参数，但仍保留了整次请求的拦截检查。因此用户没有主动改设置，也可能在升级后遇到此错误。
+
+**1.4.1 起已修复备用节点被阻断的问题。** 仅用备用节点时，不把原生专属自定义参数传给备用 API；启用原生优先时，将不支持的原生配置记为该节点的配置失败，然后继续尝试备用节点。酒馆原设置保持不变，请求记录会注明这些参数未传给备用节点；只有原生节点而没有备用节点时仍无法生成。此修复不等于支持任意自定义请求头或请求体。
+
+遇到旧版的此错误，请将前端和服务端一起更新至 1.4.1 或更新版本，重启酒馆后台并刷新网页后重试。旧记录会保留原来的错误，请查看新生成的那条记录。调大超时、增加循环次数或添加 `/v1` 不会解决旧版的这项检查。
+
 ### 酒馆原来的 API 设置去哪了？
 
 仍在顶部插头图标的“API 连接”面板。1.4.0 起插件不再改写那里的 API 来源、地址和模型；是否先用原连接，由插件列表第一行“酒馆原生 API”的勾选项控制。原接口未连接时，插件可能显示“API还没挂就绪”，表示可以提交给插件尝试，不代表已验证上游接口可用。
@@ -290,12 +356,10 @@ docker compose up -d sillytavern
 
 配置和请求记录保存在酒馆各用户的数据目录下，更新插件文件不会覆盖它们。备用 Key 位于 `silent-failover/config.json`，是服务端明文文件，请妥善保管；不要把自己的酒馆数据目录上传到公开仓库。插件记录不主动保存聊天正文，供应商错误会脱敏并截断。
 
-安装器的备份位于酒馆的 `backups/silent-failover-时间戳/`。卸载前先“恢复原连接”并停用插件，再关闭酒馆、移除两部分插件目录。保留用户数据目录可以保留节点与记录；其他插件也可能使用 `enableServerPlugins`，无需为了卸载本插件而将它关闭。
+安装器的备份位于酒馆的 `backups/silent-failover-时间戳/`。卸载前关闭“启用故障转移”并保存，再关闭酒馆、移除两部分插件目录。1.4.0 起原生连接设置保持不变，无需点击旧版的“恢复原连接”。保留用户数据目录可以保留节点与记录；其他插件也可能使用 `enableServerPlugins`，无需为了卸载本插件而将它关闭。
 
 发布包没有预置 API Key、个人节点配置或聊天记录，首次安装需要自行添加节点。
 
 ## 开发
 
-源码开发：先运行 `npm ci`、`npm run build`，再运行 `npm test`。浏览器回归使用 `npm run test:e2e`，需要隔离的酒馆实例运行在 8017、本地模拟服务运行在 9107 和 9108，分别通过 `node tests/mock-provider.mjs --serve` 和 `node tests/native-provider.mjs --serve` 启动。
-
-[验证摘要](https://github.com/tiewangba2020/SillyTavern-SilentFailover/blob/main/docs/PUBLIC-VERIFICATION.md) · [MIT 许可证](https://github.com/tiewangba2020/SillyTavern-SilentFailover/blob/main/LICENSE)
+[源码开发说明](https://github.com/tiewangba2020/SillyTavern-SilentFailover/blob/main/docs/DEVELOPMENT.md) · [MIT 许可证](https://github.com/tiewangba2020/SillyTavern-SilentFailover/blob/main/LICENSE)

@@ -77,6 +77,48 @@ const values = (page) =>
     };
   });
 
+for (const nativeFirst of [false, true]) {
+  test(`custom connection settings survive upgrade and backups reply (native first: ${nativeFirst})`, async ({
+    page,
+  }) => {
+    await setup(page, nativeFirst);
+    const custom = {
+      custom_include_body: "top_k: 20",
+      custom_exclude_body: "- frequency_penalty",
+      custom_include_headers: "X-Native-Only: private-test-value",
+    };
+    await page.evaluate(
+      (custom) =>
+        Object.assign(SillyTavern.getContext().chatCompletionSettings, custom),
+      custom,
+    );
+    await page.evaluate(() => SillyTavern.getContext().generate("normal"));
+    const records = await api(page, "/records");
+    const job = records[0];
+    expect(job.state).toBe("succeeded");
+    expect(job.attempts.map((a) => a.node)).toEqual(
+      nativeFirst ? ["酒馆原生连接", "Backup 140"] : ["Backup 140"],
+    );
+    if (nativeFirst) expect(job.attempts[0].category).toBe("configuration");
+    await expect(page.locator("#chat .mes").last()).toContainText(
+      "完整回复验证通过",
+    );
+    expect(
+      await page.evaluate(
+        (keys) =>
+          Object.fromEntries(
+            keys.map((k) => [
+              k,
+              SillyTavern.getContext().chatCompletionSettings[k],
+            ]),
+          ),
+        Object.keys(custom),
+      ),
+    ).toEqual(custom);
+    expect(JSON.stringify(records)).not.toContain("private-test-value");
+  });
+}
+
 test("native-only routing works without rewriting settings even when original status is offline", async ({
   page,
 }) => {

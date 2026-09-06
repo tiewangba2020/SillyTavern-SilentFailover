@@ -24,6 +24,17 @@
   padding: 0;
   margin: 0;
 }
+#silent-failover-settings .sf-action-label,
+.sf-task-panel .sf-action-label,
+.sf-task-notice .sf-action-label {
+  display: none;
+}
+#silent-failover-settings .sf-labeled-action .sf-action-label {
+  display: inline;
+}
+#silent-failover-settings .sf-labeled-action {
+  gap: 8px;
+}
 #silent-failover-settings .sf-actions > .menu_button:not(.sf-icon) {
   width: auto;
   min-width: 112px;
@@ -365,5 +376,117 @@
   }
   .sf-panel-select {
     height: 40px;
+  }
+}
+
+/* Touch devices need visible action names, including wide tablets and hybrid laptops. */
+@media (max-width: 600px), (any-pointer: coarse), (hover: none) {
+  #silent-failover-settings .sf-action-label,
+  .sf-task-panel .sf-action-label,
+  .sf-task-notice .sf-action-label {
+    display: inline;
+  }
+  #silent-failover-settings .sf-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  #silent-failover-settings .sf-actions > .menu_button,
+  #silent-failover-settings .sf-actions > .menu_button:not(.sf-icon),
+  #silent-failover-settings .sf-icon {
+    width: auto;
+    min-width: 44px;
+    min-height: 44px;
+    height: auto;
+    gap: 6px;
+    padding: 8px;
+    font-size: 13px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  #silent-failover-settings .sf-row-actions {
+    grid-column: 1 / -1;
+    gap: 6px;
+  }
+  #silent-failover-settings .sf-row-actions .sf-icon {
+    flex-direction: column;
+    width: 44px;
+    min-height: 52px;
+    padding: 6px 0;
+    gap: 4px;
+    font-size: 12px;
+  }
+  #silent-failover-settings .sf-field input,
+  #silent-failover-settings .sf-field select,
+  #silent-failover-settings .sf-check,
+  #silent-failover-settings summary {
+    min-height: 44px;
+  }
+  .sf-panel-icon {
+    width: 44px;
+    height: 48px;
+    min-width: 44px;
+    flex-shrink: 0;
+    gap: 4px;
+  }
+  .sf-panel-header .sf-panel-icon,
+  .sf-task-notice .sf-panel-icon {
+    flex-direction: column;
+    font-size: 12px;
+  }
+  .sf-panel-header {
+    gap: 6px;
+    padding: 8px;
+  }
+  .sf-panel-actions {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .sf-panel-switch,
+  .sf-panel-stop {
+    width: auto;
+    height: auto;
+    min-height: 44px;
+    padding: 8px;
+    font-size: 13px;
+  }
+  .sf-panel-switch span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .sf-panel-stop {
+    white-space: nowrap;
+  }
+  .sf-panel-select {
+    height: 44px;
+  }
+  .sf-notice-text {
+    min-height: 44px;
+  }
+  .sf-task-panel[data-collapsed="true"] {
+    width: 52px;
+    height: 52px;
+    min-width: 52px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: var(--SmartThemeBlurTintColor, #232624);
+  }
+  .sf-task-panel[data-collapsed="true"] .sf-panel-header {
+    padding: 0;
+    border: 0;
+    width: 100%;
+    height: 100%;
+  }
+  .sf-task-panel[data-collapsed="true"]
+    .sf-panel-header
+    > :not(.sf-panel-collapse),
+  .sf-task-panel[data-collapsed="true"] .sf-action-label {
+    display: none;
+  }
+  .sf-task-panel[data-collapsed="true"] .sf-panel-collapse {
+    width: 50px;
+    height: 50px;
+    border-radius: 50%;
+    font-size: 20px;
+    color: #a8dfca;
+    touch-action: none;
   }
 }
