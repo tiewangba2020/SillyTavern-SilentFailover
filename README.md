@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.4.2.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.4.3.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -203,9 +203,9 @@ volumes:
 
 ```bash
 docker compose stop sillytavern
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.2/SillyTavern-SilentFailover-v1.4.2.zip -o SillyTavern-SilentFailover-v1.4.2.zip
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.2/SHA256SUMS-1.4.2 -o SHA256SUMS-1.4.2
-sha256sum --check --ignore-missing SHA256SUMS-1.4.2 && unzip SillyTavern-SilentFailover-v1.4.2.zip -d api-still-up-package
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.3/SillyTavern-SilentFailover-v1.4.3.zip -o SillyTavern-SilentFailover-v1.4.3.zip
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.4.3/SHA256SUMS-1.4.3 -o SHA256SUMS-1.4.3
+sha256sum --check --ignore-missing SHA256SUMS-1.4.3 && unzip SillyTavern-SilentFailover-v1.4.3.zip -d api-still-up-package
 docker compose run --rm --no-deps --entrypoint node -v "$PWD/api-still-up-package:/tmp/api-still-up-package:ro" sillytavern /tmp/api-still-up-package/install.mjs --target /home/node/app --config /home/node/app/config/config.yaml
 docker compose up -d sillytavern
 ```
@@ -369,6 +369,12 @@ docker compose up -d sillytavern
 **1.4.1 起已修复备用节点被阻断的问题。** 仅用备用节点时，不把原生专属自定义参数传给备用 API；启用原生优先时，将不支持的原生配置记为该节点的配置失败，然后继续尝试备用节点。酒馆原设置保持不变，请求记录会注明这些参数未传给备用节点；只有原生节点而没有备用节点时仍无法生成。此修复不等于支持任意自定义请求头或请求体。
 
 遇到旧版的此错误，请将前端和服务端一起更新至 1.4.1 或更新版本，重启酒馆后台并刷新网页后重试。旧记录会保留原来的错误，请查看新生成的那条记录。调大超时、增加循环次数或添加 `/v1` 不会解决旧版的这项检查。
+
+### 所有节点立即报 `invalid onError method` 怎么办？
+
+如果记录中出现 `UND_ERR_INVALID_ARG` 和 `fetch failed: invalid onError method`，这是旧版插件请求库与部分 Node.js 内置网络库的兼容问题，通常没有收到 HTTP 响应，不能据此判断 Key 无效。
+
+**请将前端和服务端一起更新至 1.4.3 或更新版本，重启酒馆后台，再刷新网页。** 新版生成请求使用插件自带的配套请求库和连接池，避免混用不同版本；无需手动安装 Undici。增加超时或循环次数不能解决此报错。如果升级后仍失败，请导出新请求的诊断记录。
 
 ### 酒馆原来的 API 设置去哪了？
 

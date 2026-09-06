@@ -1,4 +1,5 @@
 import { test, expect, beforeAll, afterAll, vi } from "vitest";
+import http from "node:http";
 import { mockProvider } from "../mock-provider.mjs";
 import { attempt } from "../../server/upstream.js";
 import { DEFAULTS } from "../../server/store.js";
@@ -29,6 +30,42 @@ function node(name, stream = true) {
     stream,
   };
 }
+async function withResponse(respond, run) {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    respond(res);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    await run({
+      ...node("C", false),
+      url: `http://127.0.0.1:${server.address().port}/v1`,
+    });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+test("generation works independently of the host fetch dispatcher contract", async () => {
+  mock.setMode("success");
+  const incompatibleFetch = vi.fn(() => {
+    throw new TypeError("invalid onError method");
+  });
+  vi.stubGlobal("fetch", incompatibleFetch);
+  try {
+    const result = await attempt(
+      node("C"),
+      payload,
+      new AbortController().signal,
+      DEFAULTS,
+    );
+    expect(result.choices[0].message.content).toBe("完整回复验证通过。");
+    expect(incompatibleFetch).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 test("reads complete SSE across split UTF-8 byte chunks", async () => {
   mock.setMode("success");
   const diagnostics = {};
@@ -106,67 +143,92 @@ test("classifies invalid response bodies without retaining content", async () =>
     ],
     ["", "application/json", "empty"],
   ]) {
-    vi.stubGlobal(
-      "fetch",
-      async () =>
-        new Response(body, { headers: { "content-type": contentType } }),
-    );
     const diagnostics = {};
-    try {
-      await expect(
-        attempt(
-          node("C"),
-          payload,
-          new AbortController().signal,
-          DEFAULTS,
-          null,
-          diagnostics,
-        ),
-      ).rejects.toThrow("Invalid JSON");
-      expect(diagnostics.bodyShape).toBe(shape);
-      expect(JSON.stringify(diagnostics)).not.toContain(
-        "private-response-content",
-      );
-    } finally {
-      vi.unstubAllGlobals();
-    }
+    await withResponse(
+      (res) => {
+        res.setHeader("content-type", contentType);
+        res.end(body);
+      },
+      async (fixtureNode) => {
+        await expect(
+          attempt(
+            fixtureNode,
+            payload,
+            new AbortController().signal,
+            DEFAULTS,
+            null,
+            diagnostics,
+          ),
+        ).rejects.toThrow("Invalid JSON");
+        expect(diagnostics.bodyShape).toBe(shape);
+        expect(JSON.stringify(diagnostics)).not.toContain(
+          "private-response-content",
+        );
+      },
+    );
   }
 });
 
 test("records zero text for content filtering without retrying a refusal", async () => {
-  vi.stubGlobal("fetch", async () =>
-    Response.json({
-      choices: [{ message: { content: "" }, finish_reason: "content_filter" }],
-    }),
-  );
   const diagnostics = {};
-  try {
-    await attempt(
-      node("C", false),
-      payload,
-      new AbortController().signal,
-      DEFAULTS,
-      null,
-      diagnostics,
-    );
-    expect(diagnostics.completion).toMatchObject({
-      textChars: 0,
-      finishReason: "content_filter",
-    });
-  } finally {
-    vi.unstubAllGlobals();
-  }
+  await withResponse(
+    (res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          choices: [
+            { message: { content: "" }, finish_reason: "content_filter" },
+          ],
+        }),
+      );
+    },
+    async (fixtureNode) => {
+      await attempt(
+        fixtureNode,
+        payload,
+        new AbortController().signal,
+        DEFAULTS,
+        null,
+        diagnostics,
+      );
+      expect(diagnostics.completion).toMatchObject({
+        textChars: 0,
+        finishReason: "content_filter",
+      });
+    },
+  );
 });
 
 test("patient waiting accepts delayed content beyond all configured cutoffs", async () => {
-  vi.stubGlobal("fetch", async (url, options) => {
-    expect(options.dispatcher).toBeDefined();
-    await new Promise(r => setTimeout(r, 70));
-    expect(options.signal.aborted).toBe(false);
-    return Response.json({ choices: [{ message: { content: "late complete" }, finish_reason: "stop" }] });
-  });
-  try {
-    const result = await attempt(node("C", false), payload, new AbortController().signal, { ...DEFAULTS, waitMode: "patient", timeoutSeconds: .01, headerSeconds: .01, firstTokenSeconds: .01, idleSeconds: .01 });
-    expect(result.choices[0].message.content).toBe("late complete");
-  } finally { vi.unstubAllGlobals(); }
+  await withResponse(
+    async (res) => {
+      await new Promise((r) => setTimeout(r, 40));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.flushHeaders();
+      await new Promise((r) => setTimeout(r, 40));
+      res.write('{"choices":');
+      await new Promise((r) => setTimeout(r, 40));
+      res.end(
+        JSON.stringify([
+          { message: { content: "late complete" }, finish_reason: "stop" },
+        ]) + "}",
+      );
+    },
+    async (fixtureNode) => {
+      const result = await attempt(
+        fixtureNode,
+        payload,
+        new AbortController().signal,
+        {
+          ...DEFAULTS,
+          waitMode: "patient",
+          timeoutSeconds: 0.01,
+          headerSeconds: 0.01,
+          firstTokenSeconds: 0.01,
+          idleSeconds: 0.01,
+        },
+      );
+      expect(result.choices[0].message.content).toBe("late complete");
+    },
+  );
 });

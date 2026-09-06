@@ -248,7 +248,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.4.2";
+var VERSION = "1.4.3";
 
 // extension/panel.js
 var make = (tag, cls, text) => {

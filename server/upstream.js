@@ -2,7 +2,8 @@ import { createParser } from "eventsource-parser";
 import { Failure } from "./errors.js";
 import { prepare, nativeCompletion } from "./protocols.js";
 import { completionSummary } from "./diagnostics.js";
-import { Agent } from "undici";
+import { Agent, fetch } from "undici";
+// Keep fetch and its dispatcher on the same Undici version across Node releases.
 const providerAgent = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
 const LIMIT = 8 * 1024 * 1024;
 export function normalizeRequest(input) {
