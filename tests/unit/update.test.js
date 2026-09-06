@@ -74,18 +74,12 @@ function fixture(options = {}) {
   }
   fs.mkdirSync(path.join(root, "data"));
   fs.writeFileSync(path.join(root, "data/config.json"), "private-preserve");
-  const download = async (url) =>
-    url.includes("api.github.com")
-      ? {
-          tag_name: "v1.3.0",
-          assets: [
-            {
-              name: UPDATE_ASSET,
-              browser_download_url: `https://github.com/${REPOSITORY}/releases/download/v1.3.0/${UPDATE_ASSET}`,
-            },
-          ],
-        }
-      : bundle();
+  const download = async (url) => {
+    expect(url).toBe(
+      `https://github.com/${REPOSITORY}/releases/latest/download/${UPDATE_ASSET}`,
+    );
+    return bundle();
+  };
   const updater = new Updater({ root, serverDir, download, ...options });
   return { updater, root, serverDir, frontend };
 }

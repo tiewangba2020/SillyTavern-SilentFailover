@@ -260,7 +260,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.2.0";
+var VERSION = "1.2.1";
 
 // extension/index.js
 var ctx = () => SillyTavern.getContext();

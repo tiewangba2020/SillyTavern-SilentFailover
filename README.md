@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.2.0.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.2.1.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell

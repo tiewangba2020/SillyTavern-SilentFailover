@@ -125,21 +125,13 @@ export class Updater {
     };
   }
   async latest() {
-    const release = await this.download(
-      `https://api.github.com/repos/${REPOSITORY}/releases/latest`,
-      1024 * 1024,
+    // The public release download endpoint has no REST API quota or token requirement.
+    const bundle = await this.download(
+      `https://github.com/${REPOSITORY}/releases/latest/download/${UPDATE_ASSET}`,
+      12 * 1024 * 1024,
     );
-    const version = release.tag_name?.replace(/^v/, "");
-    const asset = release.assets?.find((a) => a.name === UPDATE_ASSET);
-    const expected = `https://github.com/${REPOSITORY}/releases/download/v${version}/${UPDATE_ASSET}`;
-    if (
-      !validVersion(version) ||
-      release.draft ||
-      release.prerelease ||
-      asset?.browser_download_url !== expected
-    )
-      throw new Error("最新正式版尚未提供一键更新包，请使用完整安装包");
-    return { version, url: expected };
+    const files = validatePackage(bundle, bundle?.version);
+    return { version: bundle.version, files };
   }
   async check() {
     const release = await this.latest();
@@ -238,10 +230,7 @@ export class Updater {
       };
       return;
     }
-    const files = validatePackage(
-      await this.download(release.url, 12 * 1024 * 1024),
-      release.version,
-    );
+    const files = release.files;
     const { server, frontends } = this.targets(extensions);
     const required = JSON.parse(
       files.get("frontend/manifest.json").toString(),
