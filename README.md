@@ -1,4 +1,4 @@
-# 静默 API 故障转移
+# API还没挂
 
 给 SillyTavern（酒馆）准备多个备用 API。当前接口报错、超时或中途断流时，插件会按你设置的优先级自动换到下一个接口，直到拿到回复。
 
@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.3.0.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.3.1.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -45,7 +45,7 @@ node install.mjs --target "D:\SillyTavern"
 ```
 
 3. 重新启动酒馆，刷新网页。
-4. 打开酒馆顶部的“扩展程序”，展开“静默 API 故障转移”。看到“服务端已连接”后，就可以添加节点。
+4. 打开酒馆顶部的“扩展程序”，展开“API还没挂”。看到前后端版本已连接后，就可以添加节点。
 
 酒馆目录是包含 `server.js`、`package.json` 的目录；使用启动器时，不要把启动器的外层目录当成酒馆目录。
 
@@ -78,7 +78,7 @@ https://github.com/tiewangba2020/SillyTavern-SilentFailover
 
 ### 1. 添加备用节点
 
-打开“扩展程序 → 静默 API 故障转移”，点击“新增节点”，填写后点击顶部“保存设置”。一个节点就是一组 API 地址、Key 和模型。“应用节点”只把编辑内容放入当前草稿；节点、顺序、开关与超时等修改都需要“保存设置”才会写入服务端。“撤销修改”恢复最近读取或保存的设置。
+打开“扩展程序 → API还没挂”，点击“新增节点”，填写后点击顶部“保存设置”。一个节点就是一组 API 地址、Key 和模型。“应用节点”只把编辑内容放入当前草稿；节点、顺序、开关与超时等修改都需要“保存设置”才会写入服务端。“撤销修改”恢复最近读取或保存的设置。
 
 填写地址和 Key 后，点击编辑区的“获取模型列表”图标，在模型 ID 输入框中搜索选择；也可以手动填写。支持 OpenAI 兼容、Claude 和 Gemini 模型列表，列表保留在当前编辑器内，修改地址、Key 或协议时清除。列表不代表模型已验证可调用。
 

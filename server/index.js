@@ -9,7 +9,7 @@ import { Updater } from "./update.js";
 import { listModels } from "./models.js";
 export const info = {
   id: "silent-failover",
-  name: "Silent API Failover",
+  name: "API还没挂",
   description: "Private sequential and cyclic API failover jobs",
 };
 const users = new Map();

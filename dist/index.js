@@ -260,7 +260,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.3.0";
+var VERSION = "1.3.1";
 
 // extension/panel.js
 var make = (tag, cls, text) => {
@@ -280,9 +280,9 @@ var icon = (name, title, action) => {
 };
 function createTaskPanel(api, openRecords) {
   const panel2 = make("section", "sf-task-panel");
-  panel2.setAttribute("aria-label", "\u6545\u969C\u8F6C\u79FB\u4EFB\u52A1");
+  panel2.setAttribute("aria-label", "API\u8FD8\u6CA1\u6302\u4EFB\u52A1");
   const header = make("header", "sf-panel-header");
-  const title = make("strong", "", "\u6545\u969C\u8F6C\u79FB");
+  const title = make("strong", "", "API\u8FD8\u6CA1\u6302");
   header.append(make("i", "fa-solid fa-shuffle"), title);
   const body = make("div", "sf-panel-body");
   let hidden = false, collapsed = false, selectedId, config2, records = [], lastConfigVisible = false;
@@ -1358,7 +1358,7 @@ async function restoreFailed(s) {
 async function boot() {
   if (document.getElementById("silent-failover-settings")) return;
   root = el("div", { id: "silent-failover-settings" });
-  root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>\u9759\u9ED8 API \u6545\u969C\u8F6C\u79FB</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><div class="sf-actions" data-actions></div><p class="sf-muted" data-status></p><div class="sf-controls" data-controls></div><div data-editor></div><div data-native></div><div data-nodes></div><details><summary>\u8D85\u65F6\u8BBE\u7F6E</summary><div class="sf-fields" data-advanced></div></details><details data-history><summary>\u8BF7\u6C42\u8BB0\u5F55</summary><div class="sf-actions" data-log-actions></div><div data-records></div></details></div></div>`;
+  root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>API\u8FD8\u6CA1\u6302</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><div class="sf-actions" data-actions></div><p class="sf-muted" data-status></p><div class="sf-controls" data-controls></div><div data-editor></div><div data-native></div><div data-nodes></div><details><summary>\u8D85\u65F6\u8BBE\u7F6E</summary><div class="sf-fields" data-advanced></div></details><details data-history><summary>\u8BF7\u6C42\u8BB0\u5F55</summary><div class="sf-actions" data-log-actions></div><div data-records></div></details></div></div>`;
   document.getElementById("extensions_settings2").append(root);
   const actions = root.querySelector("[data-actions]");
   const dirtyStatus = el("p", { className: "sf-muted", role: "status" });

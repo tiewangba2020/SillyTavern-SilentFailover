@@ -15,9 +15,9 @@ const icon = (name, title, action) => {
 };
 export function createTaskPanel(api, openRecords) {
   const panel = make("section", "sf-task-panel");
-  panel.setAttribute("aria-label", "故障转移任务");
+  panel.setAttribute("aria-label", "API还没挂任务");
   const header = make("header", "sf-panel-header");
-  const title = make("strong", "", "故障转移");
+  const title = make("strong", "", "API还没挂");
   header.append(make("i", "fa-solid fa-shuffle"), title);
   const body = make("div", "sf-panel-body");
   let hidden = false,
