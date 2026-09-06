@@ -1,6 +1,7 @@
 import { createParser } from "eventsource-parser";
 import { Failure } from "./errors.js";
 import { prepare, nativeCompletion } from "./protocols.js";
+import { completionSummary } from "./diagnostics.js";
 const LIMIT = 8 * 1024 * 1024;
 export function normalizeRequest(input) {
   if (!input || !Array.isArray(input.messages) || !input.messages.length)
@@ -90,7 +91,16 @@ function validate(data) {
     choice.message.content = choice.message.refusal;
   return data;
 }
-export async function attempt(node, payload, parent, settings, host = null) {
+export async function attempt(
+  node,
+  payload,
+  parent,
+  settings,
+  host = null,
+  diagnostics = {},
+) {
+  const started = Date.now();
+  diagnostics.bytes = 0;
   const controller = new AbortController();
   const signal = AbortSignal.any([parent, controller.signal]);
   const timeError = (phase) =>
@@ -121,6 +131,23 @@ export async function attempt(node, payload, parent, settings, host = null) {
       body: JSON.stringify(prepared.body),
       signal,
     });
+    diagnostics.httpStatus = response.status;
+    diagnostics.headersMs = Date.now() - started;
+    const mime = response.headers
+      .get("content-type")
+      ?.split(";")[0]
+      .trim()
+      .toLowerCase();
+    diagnostics.contentType = [
+      "application/json",
+      "text/event-stream",
+      "text/html",
+      "text/plain",
+    ].includes(mime)
+      ? mime
+      : mime
+        ? "other"
+        : "missing";
     arm(
       node.stream ? settings.firstTokenSeconds : settings.timeoutSeconds,
       "first_data",
@@ -138,9 +165,8 @@ export async function attempt(node, payload, parent, settings, host = null) {
     let refusal = "";
     let usage;
     let responseId;
-    const isSse =
-      response.ok &&
-      response.headers.get("content-type")?.includes("text/event-stream");
+    const isSse = response.ok && mime === "text/event-stream";
+    diagnostics.parser = isSse ? "sse" : "json";
     const parser = createParser({
       onEvent(event) {
         if (event.data === "[DONE]") {
@@ -227,6 +253,8 @@ export async function attempt(node, payload, parent, settings, host = null) {
       const chunk = await reader.read();
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
+      diagnostics.bytes = bytes;
+      diagnostics.firstDataMs ??= Date.now() - started;
       if (bytes > LIMIT)
         throw new Failure("Response exceeds 8 MiB", {
           category: "limit",
@@ -247,7 +275,12 @@ export async function attempt(node, payload, parent, settings, host = null) {
       try {
         data = JSON.parse(text);
       } catch {
-        data = { message: text || response.statusText };
+        diagnostics.bodyShape = !text.trim()
+          ? "empty"
+          : /^\s*</.test(text)
+            ? "html_or_xml"
+            : "non_json";
+        data = { message: "API returned a non-JSON error response" };
       }
       const error = providerFailure(data, response.status);
       const retry = response.headers.get("retry-after");
@@ -260,6 +293,15 @@ export async function attempt(node, payload, parent, settings, host = null) {
       throw error;
     }
     if (isSse) {
+      diagnostics.streamEnded = done;
+      diagnostics.completion = completionSummary({
+        choices: [
+          {
+            message: { content, reasoning_content: reasoning, refusal },
+            finish_reason: finish,
+          },
+        ],
+      });
       if (!done && !finish)
         throw new Failure("Stream ended before completion", {
           category: "interrupted",
@@ -288,12 +330,26 @@ export async function attempt(node, payload, parent, settings, host = null) {
     try {
       data = JSON.parse(text);
     } catch {
+      diagnostics.bodyShape = !text.trim()
+        ? "empty"
+        : /^\s*</.test(text)
+          ? "html_or_xml"
+          : /^\s*(data:|event:)/.test(text)
+            ? "sse_with_wrong_content_type"
+            : "invalid_json";
       throw new Failure("Invalid JSON response", {
         category: "protocol",
         phase: "parse",
       });
     }
-    return validate(nativeCompletion(data, node.protocol));
+    diagnostics.bodyShape = Array.isArray(data)
+      ? "array"
+      : data && typeof data === "object"
+        ? "object"
+        : "scalar";
+    const completion = nativeCompletion(data, node.protocol);
+    diagnostics.completion = completionSummary(completion);
+    return validate(completion);
   } catch (error) {
     if (signal.aborted) throw signal.reason;
     throw error;

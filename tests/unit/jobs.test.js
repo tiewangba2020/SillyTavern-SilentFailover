@@ -77,12 +77,21 @@ describe("sequential jobs", () => {
     );
   }, 30000);
   test("acknowledging a result releases content without losing diagnostic record", async () => {
-    const { jobs } = fixture(async () => ok);
+    const { jobs, store } = fixture(async () => ok);
     const j = await finish(jobs, jobs.create("ack-result", request).id);
     expect(j.result).toEqual(ok);
     jobs.acknowledge(j.id);
     expect(jobs.get(j.id).result).toBeUndefined();
     expect(jobs.list()[0].state).toBe("succeeded");
+    expect(jobs.list()[0].clientEvents[0].stage).toBe("browser_received");
+    expect(jobs.list()[0].attempts[0].diagnostics.completion.textChars).toBe(
+      15,
+    );
+    expect(JSON.stringify(store.loadLogs())).not.toContain("Complete answer");
+    jobs.jobs.delete(j.id);
+    expect(jobs.clientEvent(j.id, "client_failed")).toBe(true);
+    expect(jobs.clientEvent(j.id, "secret-body")).toBe(false);
+    expect(store.loadLogs()[0].clientEvents.at(-1).stage).toBe("client_failed");
   });
   test("lease expiry cancels orphaned tasks", async () => {
     const { jobs } = fixture(

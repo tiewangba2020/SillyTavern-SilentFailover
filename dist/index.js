@@ -88,6 +88,7 @@ function installAdapter(context, onLocalRecord = () => {
     originalSignal?.addEventListener("abort", abort, { once: true });
     if (originalSignal?.aborted) abort();
     active.set(id, controller);
+    let phase = "create_job";
     try {
       let job;
       let lastContact = Date.now();
@@ -95,7 +96,7 @@ function installAdapter(context, onLocalRecord = () => {
         try {
           job = await api(
             "/jobs",
-            { id, request: body, nativeFirst },
+            { id, request: body, nativeFirst, generation: saved?.type },
             controller.signal
           );
           lastContact = Date.now();
@@ -105,6 +106,7 @@ function installAdapter(context, onLocalRecord = () => {
           await delay(1e3, controller.signal);
         }
       }
+      phase = "poll_job";
       while (["running", "waiting"].includes(job.state)) {
         await delay(600, controller.signal);
         try {
@@ -119,7 +121,15 @@ function installAdapter(context, onLocalRecord = () => {
         throw cancelled();
       void api("/jobs/" + id + "/ack", {}).catch(() => {
       });
-      if (!body.stream) return json(job.result);
+      phase = "prepare_response";
+      const handoff = (response) => {
+        void api("/jobs/" + id + "/events", {
+          stage: "response_prepared"
+        }).catch(() => {
+        });
+        return response;
+      };
+      if (!body.stream) return handoff(json(job.result));
       const choice = job.result.choices[0];
       const source = body.chat_completion_source;
       if (source === "claude" || source === "makersuite") {
@@ -168,13 +178,15 @@ function installAdapter(context, onLocalRecord = () => {
             ]
           }
         ];
-        return new Response(
-          chunks.map((c) => `data: ${JSON.stringify(c)}
+        return handoff(
+          new Response(
+            chunks.map((c) => `data: ${JSON.stringify(c)}
 
 `).join("") + "data: [DONE]\n\n",
-          {
-            headers: { "Content-Type": "text/event-stream" }
-          }
+            {
+              headers: { "Content-Type": "text/event-stream" }
+            }
+          )
         );
       }
       const chunk = {
@@ -189,19 +201,33 @@ function installAdapter(context, onLocalRecord = () => {
           }
         ]
       };
-      return new Response(
-        `data: ${JSON.stringify(chunk)}
+      return handoff(
+        new Response(`data: ${JSON.stringify(chunk)}
 
 data: [DONE]
 
-`,
-        { headers: { "Content-Type": "text/event-stream" } }
+`, {
+          headers: { "Content-Type": "text/event-stream" }
+        })
       );
     } catch (e) {
+      void api("/jobs/" + id + "/events", { stage: "client_failed" }).catch(
+        () => {
+        }
+      );
       if (!controller.signal.aborted && e.name !== "AbortError")
         onLocalRecord({
+          id,
           started: Date.now(),
           state: "invalid",
+          status: Number.isInteger(e.status) ? e.status : null,
+          phase,
+          errorType: [
+            "TypeError",
+            "SyntaxError",
+            "TimeoutError",
+            "AbortError"
+          ].includes(e.name) ? e.name : "Error",
           reason: "\u670D\u52A1\u7AEF\u8FDE\u63A5\u4E0D\u53EF\u7528\u6216\u8BF7\u6C42\u65E0\u6548",
           attempts: []
         });
@@ -233,12 +259,15 @@ data: [DONE]
   };
 }
 
+// server/version.js
+var VERSION = "1.2.0";
+
 // extension/index.js
 var ctx = () => SillyTavern.getContext();
 var STATES = {
   running: "\u5C1D\u8BD5\u4E2D",
   waiting: "\u7B49\u5F85\u4E0B\u4E00\u8F6E",
-  succeeded: "\u6210\u529F",
+  succeeded: "\u4E0A\u6E38\u5DF2\u5B8C\u6210",
   failed: "\u5931\u8D25",
   exhausted: "\u672C\u8F6E\u5DF2\u8017\u5C3D",
   cancelled: "\u5DF2\u53D6\u6D88",
@@ -250,6 +279,11 @@ var config;
 var refreshTimer;
 var snapshot;
 var localRecords = [];
+var browserEvents = [];
+var recordEvent = (stage) => {
+  browserEvents.push({ stage, at: Date.now() });
+  browserEvents.splice(0, Math.max(0, browserEvents.length - 100));
+};
 var subscriptions = [];
 var el = (tag, props = {}, text) => {
   const e = document.createElement(tag);
@@ -671,7 +705,14 @@ function render() {
     ["idleSeconds", "\u6570\u636E\u95F4\u9694\u8D85\u65F6\uFF08\u79D2\uFF09", 1, 600]
   ]) {
     const field = labelInput(label, key, config[key], "number", { min, max });
-    field.querySelector("input").onchange = (e) => void guarded(() => saveConfig({ [key]: Number(e.target.value) }));
+    field.querySelector("input").onchange = (e) => void guarded(async () => {
+      if (!e.target.value || !e.target.checkValidity()) {
+        recordEvent("timeout_setting_rejected");
+        e.target.value = config[key];
+        throw new Error(`${label}\u5141\u8BB8 ${min}-${max}\uFF0C\u672A\u4FDD\u5B58\u8BE5\u4FEE\u6539`);
+      }
+      await saveConfig({ [key]: Number(e.target.value) });
+    });
     advanced.append(field);
   }
 }
@@ -706,6 +747,24 @@ async function refreshRecords() {
       )
     );
     detail.append(summary);
+    if (r.generation)
+      detail.append(
+        el(
+          "p",
+          { className: "sf-muted" },
+          `\u751F\u6210\u7C7B\u578B\uFF1A${{ normal: "\u804A\u5929\u56DE\u590D", quiet: "\u540E\u53F0\u751F\u6210\uFF08\u4E0D\u65B0\u589E\u804A\u5929\u6D88\u606F\uFF09", regenerate: "\u91CD\u65B0\u751F\u6210", swipe: "\u5207\u6362\u5019\u9009", continue: "\u7EE7\u7EED\u751F\u6210", impersonate: "\u4EE3\u5199\u7528\u6237\u6D88\u606F", unknown: "\u672A\u8BC6\u522B" }[r.generation] || "\u672A\u8BC6\u522B"}`
+        )
+      );
+    if (r.state === "succeeded") {
+      const stages = new Set((r.clientEvents || []).map((e) => e.stage));
+      detail.append(
+        el(
+          "p",
+          {},
+          r.mode === "node_test" ? "\u8282\u70B9\u6D4B\u8BD5\u5B8C\u6210\uFF0C\u4E0D\u53D1\u9001\u5230\u804A\u5929" : stages.has("client_failed") ? "\u6D4F\u89C8\u5668\u62A5\u544A\u4EA4\u4ED8\u5931\u8D25" : stages.has("response_prepared") ? "\u5DF2\u51C6\u5907\u9152\u9986\u54CD\u5E94\uFF08\u4E0D\u4EE3\u8868\u804A\u5929\u5DF2\u663E\u793A\uFF09" : stages.has("browser_received") ? "\u6D4F\u89C8\u5668\u5DF2\u6536\u5230\u7ED3\u679C" : "\u5C1A\u65E0\u6D4F\u89C8\u5668\u63A5\u6536\u786E\u8BA4\uFF1B\u65E7\u65E5\u5FD7\u4E0D\u5305\u542B\u4EA4\u4ED8\u4FE1\u606F"
+        )
+      );
+    }
     if (r.mode)
       detail.append(
         el(
@@ -778,12 +837,86 @@ async function refreshRecords() {
 ${a.code || ""} ${a.message}`
           )
         );
+      if (a.diagnostics) {
+        const d = a.diagnostics, c = d.completion, t = d.timeouts;
+        line.append(
+          el(
+            "p",
+            { className: "sf-muted" },
+            `${d.protocol || "unknown"} \xB7 ${d.stream ? "\u4E0A\u6E38\u6D41\u5F0F" : "\u4E0A\u6E38\u975E\u6D41\u5F0F"} \xB7 HTTP ${d.httpStatus ?? "\u672A\u6536\u5230"} \xB7 ${d.contentType || "\u672A\u6536\u5230\u54CD\u5E94\u5934"} \xB7 ${d.bytes ?? 0} \u5B57\u8282`
+          )
+        );
+        if (d.headersMs != null)
+          line.append(
+            el(
+              "p",
+              {},
+              `\u54CD\u5E94\u5934 ${d.headersMs} ms \xB7 \u9996\u6570\u636E ${d.firstDataMs ?? "\u672A\u6536\u5230"} ms`
+            )
+          );
+        if (c)
+          line.append(
+            el(
+              "p",
+              {},
+              `\u6B63\u6587 ${c.textChars} \u5B57\u7B26 \xB7 \u63A8\u7406 ${c.reasoningChars} \u5B57\u7B26 \xB7 \u7ED3\u675F\u539F\u56E0 ${c.finishReason}${c.refusal ? " \xB7 \u62D2\u7B54" : ""}`
+            )
+          );
+        if (d.bodyShape) line.append(el("p", {}, `\u54CD\u5E94\u7ED3\u6784\uFF1A${d.bodyShape}`));
+        if (t)
+          line.append(
+            el(
+              "p",
+              { className: "sf-muted" },
+              `\u5B9E\u9645\u8D85\u65F6\uFF08\u79D2\uFF09\uFF1A\u603B\u8BA1 ${t.timeoutSeconds} / \u54CD\u5E94\u5934 ${t.headerSeconds} / \u9996\u6570\u636E ${t.firstTokenSeconds} / \u95F4\u9694 ${t.idleSeconds}`
+            )
+          );
+      }
       detail.append(line);
     }
     area.append(detail);
   }
   if (!area.children.length)
     area.append(el("p", { className: "sf-muted" }, "\u6682\u65E0\u8BF7\u6C42\u8BB0\u5F55"));
+}
+async function exportDiagnostics() {
+  const data = await bridge.api("/diagnostics");
+  data.frontendVersion = VERSION;
+  data.browserEvents = browserEvents;
+  data.localRecords = localRecords;
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
+  );
+  const a = el("a", {
+    href: url,
+    download: `silent-failover-diagnostics-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}.json`
+  });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1e3);
+}
+async function updatePlugin() {
+  const b = root.querySelector("[data-update]");
+  b.disabled = true;
+  try {
+    if (!config?.updateSupported)
+      throw new Error(
+        "\u5F53\u524D\u670D\u52A1\u7AEF\u5C1A\u4E0D\u652F\u6301\u4E00\u952E\u66F4\u65B0\uFF0C\u8BF7\u5148\u624B\u52A8\u5B89\u88C5 1.2.0 \u6216\u66F4\u65B0\u7248\u672C\u5E76\u91CD\u542F\u9152\u9986"
+      );
+    message("\u6B63\u5728\u68C0\u67E5\u5E76\u66F4\u65B0\u524D\u540E\u7AEF\u2026");
+    let state = await bridge.api("/update", {});
+    while (state.state === "updating") {
+      await new Promise((r) => setTimeout(r, 1e3));
+      state = await bridge.api("/update/status");
+    }
+    if (state.state === "failed") throw new Error(state.error);
+    message(
+      state.restartRequired ? `\u5DF2\u5B89\u88C5 ${state.installedVersion}\uFF0C\u8BF7\u91CD\u542F\u9152\u9986\u540E\u53F0\u5E76\u5237\u65B0\u9875\u9762` : `\u5DF2\u662F\u6700\u65B0\u6B63\u5F0F\u7248 ${state.runningVersion}`
+    );
+  } finally {
+    b.disabled = false;
+  }
 }
 function watch(event, fn) {
   ctx().eventSource.on(event, fn);
@@ -850,19 +983,37 @@ async function boot() {
       })
     )
   );
+  const update = button(
+    "download",
+    "\u4E00\u952E\u66F4\u65B0\u63D2\u4EF6",
+    () => void guarded(updatePlugin)
+  );
+  update.dataset.update = "";
+  actions.append(update);
   root.querySelector("[data-log-actions]").append(
     button("rotate", "\u5237\u65B0\u8BB0\u5F55", () => void refreshRecords()),
+    button("download", "\u5BFC\u51FA\u8BCA\u65AD\u65E5\u5FD7", () => void guarded(exportDiagnostics)),
     button(
       "trash",
       "\u6E05\u7A7A\u5DF2\u7ED3\u675F\u8BB0\u5F55",
       () => void guarded(async () => {
         await bridge.api("/records/clear", {});
         localRecords.length = 0;
+        browserEvents.length = 0;
         await refreshRecords();
       })
     )
   );
   watch(ctx().eventTypes.GENERATION_STARTED, capture);
+  for (const name of [
+    "GENERATION_STARTED",
+    "GENERATION_ENDED",
+    "MESSAGE_RECEIVED",
+    "CHARACTER_MESSAGE_RENDERED"
+  ]) {
+    const event = ctx().eventTypes[name];
+    if (event) watch(event, () => recordEvent(name.toLowerCase()));
+  }
   watch(ctx().eventTypes.SETTINGS_UPDATED, renderNative);
   watch(ctx().eventTypes.CHATCOMPLETION_SOURCE_CHANGED, renderNative);
   watch(ctx().eventTypes.GENERATION_STOPPED, () => bridge.cancel("user_stop"));
@@ -881,7 +1032,18 @@ async function boot() {
   await guarded(async () => {
     config = await bridge.api("/config");
     render();
-    message("\u670D\u52A1\u7AEF\u5DF2\u8FDE\u63A5 \xB7 1.1.1");
+    message(
+      `\u524D\u7AEF ${VERSION} \xB7 \u670D\u52A1\u7AEF ${config.version || "\u672A\u77E5"}${config.version !== VERSION ? " \xB7 \u8BF7\u540C\u6B65\u5347\u7EA7\u4E24\u90E8\u5206" : " \xB7 \u5DF2\u8FDE\u63A5"}`
+    );
+    root.querySelector("[data-update]").disabled = config.canUpdate === false;
+    if (config.updateSupported) {
+      const state = await bridge.api("/update/status");
+      if (state.restartRequired)
+        message(`\u5DF2\u5B89\u88C5 ${state.installedVersion}\uFF0C\u8BF7\u91CD\u542F\u9152\u9986\u540E\u53F0\u5E76\u5237\u65B0\u9875\u9762`);
+      else if (state.state === "failed") message(state.error);
+      else if (state.state === "updating")
+        message("\u63D2\u4EF6\u66F4\u65B0\u6B63\u5728\u8FDB\u884C\uFF0C\u8BF7\u7A0D\u540E\u67E5\u770B");
+    }
   });
 }
 async function onDisable() {

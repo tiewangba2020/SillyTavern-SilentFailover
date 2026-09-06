@@ -43,6 +43,17 @@ async function call(user, route, body) {
 test("management API rejects unauthenticated callers", async () => {
   expect((await call(null, "/config")).status).toBe(401);
 });
+test("non-admin cannot start or check executable updates", async () => {
+  expect((await call("one", "/update", {})).status).toBe(403);
+  expect((await call("one", "/update/check")).status).toBe(403);
+  expect((await (await call("one", "/config")).json()).canUpdate).toBe(false);
+});
+test("diagnostic export is versioned and isolated by user", async () => {
+  const data = await (await call("two", "/diagnostics")).json();
+  expect(data.schema).toBe(2);
+  expect(data.records).toEqual([]);
+  expect(data).not.toHaveProperty("nodes");
+});
 test("per-user settings and task results cannot be read by another user", async () => {
   const config = {
     enabled: true,

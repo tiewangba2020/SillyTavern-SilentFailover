@@ -4,6 +4,8 @@ import { redact } from "./errors.js";
 import { randomUUID } from "node:crypto";
 import { loadNativeSecrets, nativeNode } from "./native.js";
 import { attempt } from "./upstream.js";
+import { VERSION } from "./version.js";
+import { Updater } from "./update.js";
 export const info = {
   id: "silent-failover",
   name: "Silent API Failover",
@@ -12,6 +14,16 @@ export const info = {
 const users = new Map();
 export async function init(router, options = {}) {
   const host = options.host ?? (await loadNativeSecrets());
+  const updater =
+    options.updater ||
+    new Updater({
+      busy: () =>
+        [...users.values()].some(({ jobs }) =>
+          [...jobs.jobs.values()].some((j) =>
+            ["running", "waiting"].includes(j.state),
+          ),
+        ),
+    });
   router.use((req, res, next) => {
     const root = req.user?.directories?.root;
     if (!root)
@@ -22,8 +34,8 @@ export async function init(router, options = {}) {
         users.set(root, {
           store,
           jobs: new Jobs(store, {
-            attempt: (node, payload, signal, settings) =>
-              attempt(node, payload, signal, settings, host),
+            attempt: (node, payload, signal, settings, diagnostics) =>
+              attempt(node, payload, signal, settings, host, diagnostics),
           }),
         });
       }
@@ -46,7 +58,9 @@ export async function init(router, options = {}) {
     "/config",
     route((req, res) =>
       res.json({
-        version: "1.1.1",
+        version: VERSION,
+        updateSupported: true,
+        canUpdate: req.user?.profile?.admin === true,
         nativeAvailable: Boolean(host?.readSecret),
         logStorageAvailable: !req.failover.jobs.storageError,
         ...req.failover.store.publicConfig(),
@@ -58,6 +72,9 @@ export async function init(router, options = {}) {
     route((req, res) =>
       res.json({
         ...req.failover.store.save(req.body),
+        version: VERSION,
+        updateSupported: true,
+        canUpdate: req.user?.profile?.admin === true,
         nativeAvailable: Boolean(host?.readSecret),
       }),
     ),
@@ -65,6 +82,10 @@ export async function init(router, options = {}) {
   router.post(
     "/jobs",
     route((req, res) => {
+      if (updater.state.state === "updating" || updater.state.restartRequired)
+        return res
+          .status(409)
+          .json({ error: "插件更新中或等待重启，请重启酒馆后生成" });
       const native = req.body.nativeFirst === true;
       if (native && !req.failover.store.config.nativeFirst)
         throw new Error("原生连接联动已关闭");
@@ -83,6 +104,7 @@ export async function init(router, options = {}) {
       }
       res.json(
         req.failover.jobs.create(req.body.id, input, {
+          generation: req.body.generation,
           nativeNode: native
             ? nativeNode(input, req.user.directories, host)
             : null,
@@ -121,6 +143,56 @@ export async function init(router, options = {}) {
     }),
   );
   router.post(
+    "/jobs/:id/events",
+    route((req, res) => {
+      const ok = req.failover.jobs.clientEvent(req.params.id, req.body?.stage);
+      res.status(ok ? 200 : 400).json({ ok });
+    }),
+  );
+  router.get(
+    "/diagnostics",
+    route((req, res) =>
+      res.json({
+        schema: 2,
+        pluginVersion: VERSION,
+        exportedAt: Date.now(),
+        logStorageAvailable: !req.failover.jobs.storageError,
+        update: { ...updater.state },
+        records: req.failover.jobs.list(),
+      }),
+    ),
+  );
+  router.get(
+    "/update/status",
+    route((req, res) =>
+      res.json({
+        ...updater.state,
+        canUpdate: req.user?.profile?.admin === true,
+      }),
+    ),
+  );
+  router.get("/update/check", async (req, res) => {
+    if (req.user?.profile?.admin !== true)
+      return res.status(403).json({ error: "仅酒馆管理员可检查和安装更新" });
+    try {
+      res.json(await updater.check());
+    } catch {
+      res
+        .status(502)
+        .json({
+          error: "无法取得 GitHub 正式版更新信息，请检查网络或下载完整安装包",
+        });
+    }
+  });
+  router.post(
+    "/update",
+    route((req, res) => {
+      if (req.user?.profile?.admin !== true)
+        return res.status(403).json({ error: "仅酒馆管理员可更新服务端插件" });
+      res.json(updater.start(req.user.directories.extensions));
+    }),
+  );
+  router.post(
     "/records/clear",
     route((req, res) => {
       req.failover.jobs.clearLogs();
@@ -130,6 +202,10 @@ export async function init(router, options = {}) {
   router.post(
     "/test",
     route((req, res) => {
+      if (updater.state.state === "updating" || updater.state.restartRequired)
+        return res
+          .status(409)
+          .json({ error: "插件更新中或等待重启，请重启酒馆后测试" });
       const node = req.failover.store.config.nodes.find(
         (n) => n.id === req.body.nodeId,
       );

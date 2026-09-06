@@ -1,9 +1,10 @@
 import { API, ENDPOINT, installAdapter } from "./adapter.js";
+import { VERSION } from "../server/version.js";
 const ctx = () => SillyTavern.getContext();
 const STATES = {
   running: "尝试中",
   waiting: "等待下一轮",
-  succeeded: "成功",
+  succeeded: "上游已完成",
   failed: "失败",
   exhausted: "本轮已耗尽",
   cancelled: "已取消",
@@ -11,6 +12,11 @@ const STATES = {
 };
 let bridge, root, config, refreshTimer, snapshot;
 const localRecords = [];
+const browserEvents = [];
+const recordEvent = (stage) => {
+  browserEvents.push({ stage, at: Date.now() });
+  browserEvents.splice(0, Math.max(0, browserEvents.length - 100));
+};
 const subscriptions = [];
 const el = (tag, props = {}, text) => {
   const e = document.createElement(tag);
@@ -467,7 +473,14 @@ function render() {
   ]) {
     const field = labelInput(label, key, config[key], "number", { min, max });
     field.querySelector("input").onchange = (e) =>
-      void guarded(() => saveConfig({ [key]: Number(e.target.value) }));
+      void guarded(async () => {
+        if (!e.target.value || !e.target.checkValidity()) {
+          recordEvent("timeout_setting_rejected");
+          e.target.value = config[key];
+          throw new Error(`${label}允许 ${min}-${max}，未保存该修改`);
+        }
+        await saveConfig({ [key]: Number(e.target.value) });
+      });
     advanced.append(field);
   }
 }
@@ -501,6 +514,32 @@ async function refreshRecords() {
       ),
     );
     detail.append(summary);
+    if (r.generation)
+      detail.append(
+        el(
+          "p",
+          { className: "sf-muted" },
+          `生成类型：${{ normal: "聊天回复", quiet: "后台生成（不新增聊天消息）", regenerate: "重新生成", swipe: "切换候选", continue: "继续生成", impersonate: "代写用户消息", unknown: "未识别" }[r.generation] || "未识别"}`,
+        ),
+      );
+    if (r.state === "succeeded") {
+      const stages = new Set((r.clientEvents || []).map((e) => e.stage));
+      detail.append(
+        el(
+          "p",
+          {},
+          r.mode === "node_test"
+            ? "节点测试完成，不发送到聊天"
+            : stages.has("client_failed")
+              ? "浏览器报告交付失败"
+              : stages.has("response_prepared")
+                ? "已准备酒馆响应（不代表聊天已显示）"
+                : stages.has("browser_received")
+                  ? "浏览器已收到结果"
+                  : "尚无浏览器接收确认；旧日志不包含交付信息",
+        ),
+      );
+    }
     if (r.mode)
       detail.append(
         el(
@@ -573,12 +612,90 @@ async function refreshRecords() {
             `${a.category} / ${a.phase}\n${a.code || ""} ${a.message}`,
           ),
         );
+      if (a.diagnostics) {
+        const d = a.diagnostics,
+          c = d.completion,
+          t = d.timeouts;
+        line.append(
+          el(
+            "p",
+            { className: "sf-muted" },
+            `${d.protocol || "unknown"} · ${d.stream ? "上游流式" : "上游非流式"} · HTTP ${d.httpStatus ?? "未收到"} · ${d.contentType || "未收到响应头"} · ${d.bytes ?? 0} 字节`,
+          ),
+        );
+        if (d.headersMs != null)
+          line.append(
+            el(
+              "p",
+              {},
+              `响应头 ${d.headersMs} ms · 首数据 ${d.firstDataMs ?? "未收到"} ms`,
+            ),
+          );
+        if (c)
+          line.append(
+            el(
+              "p",
+              {},
+              `正文 ${c.textChars} 字符 · 推理 ${c.reasoningChars} 字符 · 结束原因 ${c.finishReason}${c.refusal ? " · 拒答" : ""}`,
+            ),
+          );
+        if (d.bodyShape) line.append(el("p", {}, `响应结构：${d.bodyShape}`));
+        if (t)
+          line.append(
+            el(
+              "p",
+              { className: "sf-muted" },
+              `实际超时（秒）：总计 ${t.timeoutSeconds} / 响应头 ${t.headerSeconds} / 首数据 ${t.firstTokenSeconds} / 间隔 ${t.idleSeconds}`,
+            ),
+          );
+      }
       detail.append(line);
     }
     area.append(detail);
   }
   if (!area.children.length)
     area.append(el("p", { className: "sf-muted" }, "暂无请求记录"));
+}
+async function exportDiagnostics() {
+  const data = await bridge.api("/diagnostics");
+  data.frontendVersion = VERSION;
+  data.browserEvents = browserEvents;
+  data.localRecords = localRecords;
+  const url = URL.createObjectURL(
+    new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+  );
+  const a = el("a", {
+    href: url,
+    download: `silent-failover-diagnostics-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
+  });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+async function updatePlugin() {
+  const b = root.querySelector("[data-update]");
+  b.disabled = true;
+  try {
+    if (!config?.updateSupported)
+      throw new Error(
+        "当前服务端尚不支持一键更新，请先手动安装 1.2.0 或更新版本并重启酒馆",
+      );
+    message("正在检查并更新前后端…");
+    let state = await bridge.api("/update", {});
+    while (state.state === "updating") {
+      await new Promise((r) => setTimeout(r, 1000));
+      state = await bridge.api("/update/status");
+    }
+    if (state.state === "failed") throw new Error(state.error);
+    message(
+      state.restartRequired
+        ? `已安装 ${state.installedVersion}，请重启酒馆后台并刷新页面`
+        : `已是最新正式版 ${state.runningVersion}`,
+    );
+  } finally {
+    b.disabled = false;
+  }
 }
 function watch(event, fn) {
   ctx().eventSource.on(event, fn);
@@ -647,8 +764,16 @@ async function boot() {
         }),
     ),
   );
+  const update = button(
+    "download",
+    "一键更新插件",
+    () => void guarded(updatePlugin),
+  );
+  update.dataset.update = "";
+  actions.append(update);
   root.querySelector("[data-log-actions]").append(
     button("rotate", "刷新记录", () => void refreshRecords()),
+    button("download", "导出诊断日志", () => void guarded(exportDiagnostics)),
     button(
       "trash",
       "清空已结束记录",
@@ -656,11 +781,21 @@ async function boot() {
         void guarded(async () => {
           await bridge.api("/records/clear", {});
           localRecords.length = 0;
+          browserEvents.length = 0;
           await refreshRecords();
         }),
     ),
   );
   watch(ctx().eventTypes.GENERATION_STARTED, capture);
+  for (const name of [
+    "GENERATION_STARTED",
+    "GENERATION_ENDED",
+    "MESSAGE_RECEIVED",
+    "CHARACTER_MESSAGE_RENDERED",
+  ]) {
+    const event = ctx().eventTypes[name];
+    if (event) watch(event, () => recordEvent(name.toLowerCase()));
+  }
   watch(ctx().eventTypes.SETTINGS_UPDATED, renderNative);
   watch(ctx().eventTypes.CHATCOMPLETION_SOURCE_CHANGED, renderNative);
   watch(ctx().eventTypes.GENERATION_STOPPED, () => bridge.cancel("user_stop"));
@@ -679,7 +814,18 @@ async function boot() {
   await guarded(async () => {
     config = await bridge.api("/config");
     render();
-    message("服务端已连接 · 1.1.1");
+    message(
+      `前端 ${VERSION} · 服务端 ${config.version || "未知"}${config.version !== VERSION ? " · 请同步升级两部分" : " · 已连接"}`,
+    );
+    root.querySelector("[data-update]").disabled = config.canUpdate === false;
+    if (config.updateSupported) {
+      const state = await bridge.api("/update/status");
+      if (state.restartRequired)
+        message(`已安装 ${state.installedVersion}，请重启酒馆后台并刷新页面`);
+      else if (state.state === "failed") message(state.error);
+      else if (state.state === "updating")
+        message("插件更新正在进行，请稍后查看");
+    }
   });
 }
 export async function onDisable() {

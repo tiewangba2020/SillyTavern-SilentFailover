@@ -113,6 +113,7 @@ export function installAdapter(
     originalSignal?.addEventListener("abort", abort, { once: true });
     if (originalSignal?.aborted) abort();
     active.set(id, controller);
+    let phase = "create_job";
     try {
       let job;
       let lastContact = Date.now();
@@ -120,7 +121,7 @@ export function installAdapter(
         try {
           job = await api(
             "/jobs",
-            { id, request: body, nativeFirst },
+            { id, request: body, nativeFirst, generation: saved?.type },
             controller.signal,
           );
           lastContact = Date.now();
@@ -134,6 +135,7 @@ export function installAdapter(
           await delay(1000, controller.signal);
         }
       }
+      phase = "poll_job";
       while (["running", "waiting"].includes(job.state)) {
         await delay(600, controller.signal);
         try {
@@ -151,7 +153,14 @@ export function installAdapter(
       if (controller.signal.aborted || job.state !== "succeeded")
         throw cancelled();
       void api("/jobs/" + id + "/ack", {}).catch(() => {});
-      if (!body.stream) return json(job.result);
+      phase = "prepare_response";
+      const handoff = (response) => {
+        void api("/jobs/" + id + "/events", {
+          stage: "response_prepared",
+        }).catch(() => {});
+        return response;
+      };
+      if (!body.stream) return handoff(json(job.result));
       const choice = job.result.choices[0];
       const source = body.chat_completion_source;
       if (source === "claude" || source === "makersuite") {
@@ -207,12 +216,14 @@ export function installAdapter(
                   ],
                 },
               ];
-        return new Response(
-          chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") +
-            "data: [DONE]\n\n",
-          {
-            headers: { "Content-Type": "text/event-stream" },
-          },
+        return handoff(
+          new Response(
+            chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") +
+              "data: [DONE]\n\n",
+            {
+              headers: { "Content-Type": "text/event-stream" },
+            },
+          ),
         );
       }
       const chunk = {
@@ -227,15 +238,30 @@ export function installAdapter(
           },
         ],
       };
-      return new Response(
-        `data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`,
-        { headers: { "Content-Type": "text/event-stream" } },
+      return handoff(
+        new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+          headers: { "Content-Type": "text/event-stream" },
+        }),
       );
     } catch (e) {
+      void api("/jobs/" + id + "/events", { stage: "client_failed" }).catch(
+        () => {},
+      );
       if (!controller.signal.aborted && e.name !== "AbortError")
         onLocalRecord({
+          id,
           started: Date.now(),
           state: "invalid",
+          status: Number.isInteger(e.status) ? e.status : null,
+          phase,
+          errorType: [
+            "TypeError",
+            "SyntaxError",
+            "TimeoutError",
+            "AbortError",
+          ].includes(e.name)
+            ? e.name
+            : "Error",
           reason: "服务端连接不可用或请求无效",
           attempts: [],
         });

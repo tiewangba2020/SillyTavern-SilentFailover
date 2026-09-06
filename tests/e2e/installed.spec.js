@@ -82,6 +82,43 @@ async function generate(page, type = "normal") {
     }
   }, type);
 }
+
+test("diagnostics distinguish quiet requests and export safe browser delivery events", async ({ page }) => {
+  await setup(page, "success");
+  await generate(page, "quiet");
+  await expect.poll(async () => (await api(page, "/records"))[0]?.clientEvents?.some(e => e.stage === "response_prepared")).toBe(true);
+  const quiet = (await api(page, "/records"))[0];
+  expect(quiet.generation).toBe("quiet");
+  expect(quiet.attempts.at(-1).diagnostics.completion.textChars).toBe(9);
+  await page.locator("#extensions-settings-button .drawer-toggle").click();
+  const root = page.locator("#silent-failover-settings");
+  await root.locator("[data-history] > summary").click();
+  const download = page.waitForEvent("download");
+  await root.getByRole("button", { name: "导出诊断日志" }).click();
+  const file = await download;
+  const stream = await file.createReadStream();
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  const text = Buffer.concat(chunks).toString();
+  const data = JSON.parse(text);
+  expect(data.schema).toBe(2);
+  expect(data.browserEvents.some(e => e.stage === "generation_ended")).toBe(true);
+  expect(text).not.toContain("test-only-");
+  expect(text).not.toContain("完整回复验证通过。");
+});
+
+test("one-click update reports restart and handles download failure in the settings panel", async ({ page }) => {
+  const root = await open(page);
+  await page.route("**/api/plugins/silent-failover/update", route => route.fulfill({ json: { state: "updating" } }));
+  await page.route("**/api/plugins/silent-failover/update/status", route => route.fulfill({ json: { state: "installed", installedVersion: "1.3.0", restartRequired: true } }));
+  await root.getByRole("button", { name: "一键更新插件" }).click();
+  await expect(root.locator("[data-status]")).toContainText("请重启酒馆后台并刷新页面");
+  await page.unroute("**/api/plugins/silent-failover/update/status");
+  await page.route("**/api/plugins/silent-failover/update/status", route => route.fulfill({ json: { state: "failed", error: "GitHub 下载失败（HTTP 503）" } }));
+  await root.getByRole("button", { name: "一键更新插件" }).click();
+  await expect(root.locator("[data-status]")).toHaveText("GitHub 下载失败（HTTP 503）");
+  await expect(root.getByRole("button", { name: "一键更新插件" })).toBeEnabled();
+});
 test("real-world global sampling survives a quota failure and Claude fallback", async ({ page }) => {
   await setup(page, "parameters");
   const c = await api(page, "/config");

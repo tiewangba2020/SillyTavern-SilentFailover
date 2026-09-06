@@ -1,11 +1,14 @@
 import { attempt, normalizeRequest } from "./upstream.js";
 import { abortError, failureRecord, sleep, CANCEL_REASONS } from "./errors.js";
 import { adaptParameters } from "./parameters.js";
+import { completionSummary, generationType } from "./diagnostics.js";
+import { VERSION } from "./version.js";
 const terminal = new Set(["succeeded", "exhausted", "cancelled", "invalid"]);
 export class Jobs {
   constructor(store, options = {}) {
     this.store = store;
-    this.attempt = options.attempt || attempt;
+    this.attempt =
+      options.attempt || ((n, p, s, c, d) => attempt(n, p, s, c, null, d));
     this.waitMs = options.waitMs;
     this.leaseMs = options.leaseMs || 60000;
     this.jobs = new Map();
@@ -24,7 +27,7 @@ export class Jobs {
     this.sweep = setInterval(() => this.expire(), Math.min(this.leaseMs, 5000));
     this.sweep.unref?.();
   }
-  create(id, input, { testNode, nativeNode = null } = {}) {
+  create(id, input, { testNode, nativeNode = null, generation } = {}) {
     if (typeof id !== "string" || !id.length || id.length > 120)
       throw new Error("任务 ID 无效");
     if (this.jobs.has(id)) return this.get(id, true);
@@ -36,6 +39,10 @@ export class Jobs {
       throw new Error("同时运行的任务过多");
     const job = {
       id,
+      logVersion: 2,
+      pluginVersion: VERSION,
+      generation: generationType(generation),
+      clientEvents: [],
       state: "running",
       round: 0,
       started: Date.now(),
@@ -117,6 +124,18 @@ export class Jobs {
             started: Date.now(),
             state: "running",
             adjustments: adapted.adjustments,
+            diagnostics: {
+              protocol: node.protocol || "openai",
+              stream: node.stream !== false,
+              timeouts: Object.fromEntries(
+                [
+                  "timeoutSeconds",
+                  "headerSeconds",
+                  "firstTokenSeconds",
+                  "idleSeconds",
+                ].map((k) => [k, config[k]]),
+              ),
+            },
           };
           job.attempts.push(entry);
           job.attemptCount++;
@@ -130,9 +149,11 @@ export class Jobs {
               adapted.payload,
               signal,
               config,
+              entry.diagnostics,
             );
             if (signal.aborted) throw signal.reason;
             entry.state = "succeeded";
+            entry.diagnostics.completion = completionSummary(result);
             entry.ms = Date.now() - entry.started;
             job.state = "succeeded";
             job.result = result;
@@ -241,7 +262,24 @@ export class Jobs {
     if (j && terminal.has(j.state)) {
       j.result = null;
       j.lease = Date.now();
+      this.clientEvent(id, "browser_received");
     }
+  }
+  clientEvent(id, stage) {
+    if (
+      !["browser_received", "response_prepared", "client_failed"].includes(
+        stage,
+      )
+    )
+      return false;
+    const j = this.jobs.get(id) || this.records.find((r) => r.id === id);
+    if (!j) return false;
+    j.clientEvents ||= [];
+    if (!j.clientEvents.some((e) => e.stage === stage)) {
+      j.clientEvents.push({ stage, at: Date.now() });
+      this.persist();
+    }
+    return true;
   }
   configChanged() {
     for (const j of this.jobs.values()) {
