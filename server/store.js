@@ -45,10 +45,51 @@ export class Store {
           ...JSON.parse(fs.readFileSync(this.file, "utf8")),
         }
       : structuredClone(DEFAULTS);
+    const stored = this.config;
+    this.revision = Number.isSafeInteger(stored.revision) ? stored.revision : 0;
+    this.presets = stored.presets || [
+      { id: randomUUID(), name: "默认预设", config: this.cleanConfig(stored) },
+    ];
+    this.activePresetId = stored.activePresetId || this.presets[0].id;
+    this.config = this.presets.find(
+      (p) => p.id === this.activePresetId,
+    )?.config;
+    if (!this.config) throw new Error("当前预设不存在");
+    if (!stored.presets) this.persistConfig();
+  }
+  cleanConfig(config) {
+    return Object.fromEntries(
+      Object.entries(config).filter(([k]) => Object.hasOwn(DEFAULTS, k)),
+    );
+  }
+  persistConfig() {
+    atomicJson(this.file, {
+      ...this.config,
+      schema: 3,
+      revision: this.revision,
+      activePresetId: this.activePresetId,
+      presets: this.presets,
+    });
+  }
+  presetName() {
+    return this.presets.find((p) => p.id === this.activePresetId).name;
+  }
+  assertCurrent(input) {
+    if (
+      (input.activePresetId && input.activePresetId !== this.activePresetId) ||
+      (input.revision !== undefined && input.revision !== this.revision)
+    )
+      throw new Error(
+        "配置已在其他页面更改，请刷新配置后重试；当前修改尚未保存",
+      );
   }
   publicConfig() {
     return {
       ...this.config,
+      activePresetId: this.activePresetId,
+      presetName: this.presetName(),
+      presets: this.presets.map(({ id, name }) => ({ id, name })),
+      revision: this.revision,
       nodes: this.config.nodes.map(({ key, maxTokens, ...n }) => ({
         ...n,
         keySet: Boolean(key),
@@ -57,7 +98,9 @@ export class Store {
     };
   }
   keys() {
-    return this.config.nodes.map((n) => n.key).filter(Boolean);
+    return this.presets
+      .flatMap((p) => p.config.nodes.map((n) => n.key))
+      .filter(Boolean);
   }
   previewNode(input, requireModel = true, settings = {}) {
     if (!input || typeof input !== "object") throw new Error("节点无效");
@@ -158,9 +201,73 @@ export class Store {
     return config;
   }
   save(input) {
+    this.assertCurrent(input);
     const config = this.validate(input);
-    atomicJson(this.file, config);
+    const presets = this.presets.map((p) =>
+      p.id === this.activePresetId ? { ...p, config } : p,
+    );
+    atomicJson(this.file, {
+      ...config,
+      schema: 3,
+      activePresetId: this.activePresetId,
+      revision: this.revision + 1,
+      presets,
+    });
+    this.presets = presets;
+    this.revision++;
     this.config = config;
+    for (const fn of this.listeners) fn();
+    return this.publicConfig();
+  }
+  changePreset(input) {
+    this.assertCurrent(input);
+    const { action, id } = input;
+    let presets = structuredClone(this.presets),
+      active = this.activePresetId;
+    const current = presets.find((p) => p.id === active);
+    if (["create", "copy", "rename"].includes(action)) {
+      const name = typeof input.name === "string" ? input.name.trim() : "";
+      if (
+        !name ||
+        name.length > 60 ||
+        presets.some(
+          (p) => p.name === name && (action !== "rename" || p.id !== active),
+        )
+      )
+        throw new Error("预设名称不能为空、重复或超过 60 个字符");
+      if (action === "rename") current.name = name;
+      else {
+        if (presets.length >= 30) throw new Error("最多保存 30 个预设");
+        active = randomUUID();
+        presets.push({
+          id: active,
+          name,
+          config:
+            action === "copy"
+              ? structuredClone(current.config)
+              : structuredClone(DEFAULTS),
+        });
+      }
+    } else if (action === "activate") {
+      if (!presets.some((p) => p.id === id)) throw new Error("预设不存在");
+      active = id;
+    } else if (action === "delete") {
+      if (presets.length === 1) throw new Error("至少保留一个预设");
+      presets = presets.filter((p) => p.id !== active);
+      active = presets[0].id;
+    } else throw new Error("预设操作无效");
+    const config = presets.find((p) => p.id === active).config;
+    atomicJson(this.file, {
+      ...config,
+      schema: 3,
+      activePresetId: active,
+      revision: this.revision + 1,
+      presets,
+    });
+    this.presets = presets;
+    this.activePresetId = active;
+    this.config = config;
+    this.revision++;
     for (const fn of this.listeners) fn();
     return this.publicConfig();
   }

@@ -17,7 +17,12 @@ beforeAll(async () => {
     next();
   });
   const router = express.Router();
-  await init(router);
+  await init(router, {
+    updater: {
+      state: { state: "idle" },
+      check: async () => ({ latestVersion: "1.9.0", available: true }),
+    },
+  });
   app.use("/api", router);
   server = await new Promise((r) => {
     const s = app.listen(0, "127.0.0.1", () => r(s));
@@ -43,9 +48,9 @@ async function call(user, route, body) {
 test("management API rejects unauthenticated callers", async () => {
   expect((await call(null, "/config")).status).toBe(401);
 });
-test("non-admin cannot start or check executable updates", async () => {
+test("non-admin can read update metadata but cannot install updates", async () => {
   expect((await call("one", "/update", {})).status).toBe(403);
-  expect((await call("one", "/update/check")).status).toBe(403);
+  expect((await call("one", "/update/check")).status).toBe(200);
   expect((await (await call("one", "/config")).json()).canUpdate).toBe(false);
 });
 test("diagnostic export is versioned and isolated by user", async () => {

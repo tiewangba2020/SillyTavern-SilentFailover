@@ -5,6 +5,7 @@ import { completionSummary, generationType } from "./diagnostics.js";
 import { VERSION } from "./version.js";
 import { completeApiUrl } from "./url.js";
 import { Failure } from "./errors.js";
+import { tokenUsage } from "./usage.js";
 const terminal = new Set(["succeeded", "exhausted", "cancelled", "invalid"]);
 export class Jobs {
   constructor(store, options = {}) {
@@ -73,6 +74,9 @@ export class Jobs {
       logVersion: 2,
       pluginVersion: VERSION,
       generation: generationType(generation),
+      presetId: this.store.activePresetId,
+      presetName: this.store.presetName(),
+      jobConfig: structuredClone(this.store.config),
       clientEvents: [],
       state: "running",
       round: 0,
@@ -123,7 +127,7 @@ export class Jobs {
     const retryTimes = new Map();
     try {
       while (!signal.aborted) {
-        const config = structuredClone(this.store.config);
+        const config = structuredClone(job.jobConfig);
         job.maxRounds = config.loop ? config.maxRounds || 0 : 1;
         if (job.maxRounds && job.round >= job.maxRounds) {
           job.state = "exhausted";
@@ -206,8 +210,7 @@ export class Jobs {
             }
             delete job.nextAttemptAt;
           }
-          const settings =
-            job.testSettings || structuredClone(this.store.config);
+          const settings = job.testSettings || structuredClone(job.jobConfig);
           const adapted = adaptParameters(node, job.payload);
           const entry = {
             nodeId: node.id,
@@ -267,6 +270,13 @@ export class Jobs {
             entry.ms = Date.now() - entry.started;
             job.state = "succeeded";
             job.result = result;
+            const usage =
+              entry.diagnostics.usage ||
+              tokenUsage(result.usage, node.protocol);
+            if (usage) {
+              entry.diagnostics.usage = usage;
+              job.result.tokenUsage = usage;
+            }
             return;
           } catch (error) {
             entry.ms = Date.now() - entry.started;
@@ -302,7 +312,7 @@ export class Jobs {
         }
         if (
           job.testNode ||
-          !this.store.config.loop ||
+          !job.jobConfig.loop ||
           (job.maxRounds && job.round >= job.maxRounds)
         ) {
           job.state = "exhausted";
@@ -313,7 +323,7 @@ export class Jobs {
         }
         job.state = "waiting";
         this.persist();
-        const ms = this.waitMs ?? this.store.config.intervalSeconds * 1000;
+        const ms = this.waitMs ?? job.jobConfig.intervalSeconds * 1000;
         job.nextAttemptAt = Date.now() + ms;
         job.waitController = new AbortController();
         try {
@@ -323,7 +333,7 @@ export class Jobs {
         }
         delete job.waitController;
         delete job.nextAttemptAt;
-        if (!this.store.config.loop) {
+        if (!job.jobConfig.loop) {
           job.state = "exhausted";
           break;
         }
@@ -344,6 +354,7 @@ export class Jobs {
     job.nativeNode = null;
     job.previewNode = null;
     job.testSettings = null;
+    job.jobConfig = null;
     job.attemptController = null;
     delete job.pendingSwitch;
     job.controller = null;
@@ -362,6 +373,8 @@ export class Jobs {
       nativeNode,
       previewNode,
       testSettings,
+      jobConfig,
+      presetDetached,
       attemptController,
       pendingSwitch,
       ...safe
@@ -441,6 +454,10 @@ export class Jobs {
   }
   configChanged() {
     for (const j of this.jobs.values()) {
+      if (terminal.has(j.state)) continue;
+      if (j.presetId !== this.store.activePresetId) j.presetDetached = true;
+      if (j.presetDetached) continue;
+      j.jobConfig = structuredClone(this.store.config);
       if (!this.store.config.enabled && !j.testNode)
         this.cancel(j.id, "plugin_disabled");
       else if (j.nativeNode && !this.store.config.nativeFirst)

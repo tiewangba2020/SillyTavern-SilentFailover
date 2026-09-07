@@ -1,3 +1,37 @@
+// server/usage.js
+function usageForHost(usage, source = "openai") {
+  if (!usage) return void 0;
+  const {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: total,
+    reasoningTokens: reasoning,
+    cacheReadTokens: read,
+    cacheWriteTokens: write
+  } = usage;
+  const fields = source === "claude" ? {
+    input_tokens: input === void 0 ? void 0 : Math.max(0, input - (read || 0) - (write || 0)),
+    output_tokens: output,
+    cache_read_input_tokens: read,
+    cache_creation_input_tokens: write
+  } : source === "makersuite" ? {
+    promptTokenCount: input,
+    candidatesTokenCount: output === void 0 ? void 0 : Math.max(0, output - (reasoning || 0)),
+    totalTokenCount: total,
+    thoughtsTokenCount: reasoning,
+    cachedContentTokenCount: read
+  } : {
+    prompt_tokens: input,
+    completion_tokens: output,
+    total_tokens: total,
+    ...reasoning === void 0 ? {} : { completion_tokens_details: { reasoning_tokens: reasoning } },
+    ...read === void 0 ? {} : { prompt_tokens_details: { cached_tokens: read } }
+  };
+  return Object.fromEntries(
+    Object.entries(fields).filter(([, v]) => v !== void 0)
+  );
+}
+
 // extension/adapter.js
 var ENDPOINT = "http://sillytavern-failover.invalid/v1";
 var API = "/api/plugins/silent-failover";
@@ -56,6 +90,7 @@ function installAdapter(context, onLocalRecord = () => {
       body?.chat_completion_source
     ))
       return previous(input, init);
+    await lifecycle.flush?.();
     const settings = await api("/config").catch(
       () => lifecycle.config?.() || null
     );
@@ -117,9 +152,13 @@ function installAdapter(context, onLocalRecord = () => {
         });
         return response;
       };
-      if (!body.stream) return handoff(json(job.result));
+      if (!body.stream) {
+        const usage2 = usageForHost(job.result.tokenUsage);
+        return handoff(json({ ...job.result, ...usage2 ? { usage: usage2 } : {} }));
+      }
       const choice = job.result.choices[0];
       const source = body.chat_completion_source;
+      const usage = usageForHost(job.result.tokenUsage, source);
       if (source === "claude" || source === "makersuite") {
         const message2 = choice.message;
         const chunks = source === "claude" ? [
@@ -138,7 +177,11 @@ function installAdapter(context, onLocalRecord = () => {
             index: 0,
             delta: { type: "text_delta", text: message2.content }
           },
-          { type: "message_delta", delta: { stop_reason: "end_turn" } },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            ...usage ? { usage } : {}
+          },
           { type: "message_stop" }
         ] : [
           ...message2.reasoning_content ? [
@@ -158,6 +201,7 @@ function installAdapter(context, onLocalRecord = () => {
             }
           ] : [],
           {
+            ...usage ? { usageMetadata: usage } : {},
             candidates: [
               {
                 content: { parts: [{ text: message2.content }] },
@@ -181,6 +225,7 @@ function installAdapter(context, onLocalRecord = () => {
         id: job.result.id,
         object: "chat.completion.chunk",
         model: job.result.model,
+        ...usage ? { usage } : {},
         choices: [
           {
             index: 0,
@@ -248,7 +293,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.4.3";
+var VERSION = "1.5.0";
 
 // extension/panel.js
 var make = (tag, cls, text) => {
@@ -268,13 +313,29 @@ var icon = (name, title, action, touchLabel) => {
   b.onclick = action;
   return b;
 };
-function createTaskPanel(api, openRecords) {
+function createTaskPanel(api, openRecords, switchPreset = async () => {
+}) {
   const panel2 = make("section", "sf-task-panel");
   panel2.setAttribute("aria-label", "API\u8FD8\u6CA1\u6302\u4EFB\u52A1");
   const header = make("header", "sf-panel-header");
   const title = make("strong", "", "API\u8FD8\u6CA1\u6302");
   header.append(make("i", "fa-solid fa-shuffle"), title);
   const body = make("div", "sf-panel-body");
+  const presets = make("select", "sf-panel-select");
+  presets.setAttribute("aria-label", "\u5207\u6362\u9884\u8BBE");
+  const presetLabel = make("label", "sf-panel-target");
+  presetLabel.append(make("span", "", "\u9884\u8BBE"), presets);
+  presets.onchange = async () => {
+    presets.disabled = true;
+    try {
+      await switchPreset(presets.value);
+    } catch (e) {
+      commandError = e.message;
+    } finally {
+      presets.disabled = false;
+      render2();
+    }
+  };
   let hidden = false, collapsed = false, suppressPointerClick = false, selectedId, preferredNodeId = "", chooserContext, config2, records = [], lastConfigVisible = false;
   const collapse = icon(
     "minus",
@@ -365,7 +426,7 @@ function createTaskPanel(api, openRecords) {
   );
   stop.classList.add("sf-panel-stop");
   actions.append(targetLabel, switchButton, stop);
-  body.append(tasks, status, node, model, stats, actions);
+  body.append(presetLabel, tasks, status, node, model, stats, actions);
   panel2.append(header, body);
   document.body.append(panel2);
   panel2.hidden = true;
@@ -449,6 +510,11 @@ function createTaskPanel(api, openRecords) {
     tasks.hidden = active.length < 2;
     const a = job?.attempts?.at(-1);
     const running = !!job && ["running", "waiting"].includes(job.state);
+    fill(
+      presets,
+      (config2?.presets || []).map((p) => [p.id, p.name]),
+      config2?.activePresetId
+    );
     const savedNodes = (config2?.nodes || []).filter((n) => n.enabled).sort((a2, b) => a2.priority - b.priority);
     if (preferredNodeId && !savedNodes.some((n) => n.id === preferredNodeId))
       preferredNodeId = "";
@@ -464,6 +530,8 @@ function createTaskPanel(api, openRecords) {
     node.textContent = a?.node || "\u5C31\u7EEA";
     model.textContent = a ? `${a.model} \xB7 ${a.diagnostics?.stream !== false ? "\u6D41\u5F0F" : "\u975E\u6D41\u5F0F"}` : "";
     stats.textContent = job ? `\u7B2C ${job.round}${job.maxRounds ? " / " + job.maxRounds : ""} \u8F6E  \xB7  ${Math.max(0, Math.floor(((job.ended || Date.now()) - job.started) / 1e3))} \u79D2  \xB7  ${job.attemptCount} \u6B21\u5C1D\u8BD5` : "";
+    if (running && job.presetId !== config2?.activePresetId)
+      stats.textContent += ` \xB7 \u672C\u6B21\u4F7F\u7528 ${job.presetName}\uFF0C\u65B0\u9884\u8BBE\u7528\u4E8E\u4E0B\u6B21`;
     if (!running && preferred) {
       status.textContent = "\u4E0B\u6B21\u751F\u6210\u5DF2\u5C31\u7EEA";
       node.textContent = preferred.name;
@@ -496,8 +564,8 @@ function createTaskPanel(api, openRecords) {
     switchText.textContent = running ? "\u5207\u6362 API" : "\u5E94\u7528\u4E8E\u4E0B\u6B21\u751F\u6210";
     switchButton.title = switchText.textContent;
     switchButton.setAttribute("aria-label", switchText.textContent);
-    choose.disabled = commandBusy || !config2?.enabled;
-    switchButton.disabled = commandBusy || !config2?.enabled || (running ? !choose.value || choose.value === a?.nodeId : choose.value === preferredNodeId);
+    choose.disabled = commandBusy || !running && !config2?.enabled;
+    switchButton.disabled = commandBusy || !running && !config2?.enabled || (running ? !choose.value || choose.value === a?.nodeId : choose.value === preferredNodeId);
     stop.disabled = !running || commandBusy;
     if (commandError) status.textContent = commandError;
     panel2.hidden = !config2?.floatingWindow || hidden;
@@ -574,6 +642,10 @@ function createTaskPanel(api, openRecords) {
       return id;
     },
     update(nextConfig, nextRecords) {
+      if (config2?.activePresetId !== nextConfig.activePresetId) {
+        preferredNodeId = "";
+        chooserContext = void 0;
+      }
       config2 = nextConfig;
       records = nextRecords;
       if (config2.floatingWindow !== lastConfigVisible) hidden = false;
@@ -629,6 +701,12 @@ var savedConfig;
 var dirty = false;
 var editorRead;
 var panel;
+var saveTimer;
+var savePromise;
+var editRevision = 0;
+var presetBusy = false;
+var editorSync;
+var updateTimer;
 var testControllers = /* @__PURE__ */ new Set();
 var localRecords = [];
 var browserEvents = [];
@@ -722,10 +800,16 @@ function editor(node = {
   enabled: true,
   stream: true
 }) {
+  if (editorRead) {
+    message("\u8BF7\u5148\u5B8C\u6210\u5F53\u524D\u8282\u70B9\u7F16\u8F91");
+    return;
+  }
+  const existing = Boolean(node.id);
+  node = { ...node, id: node.id || crypto.randomUUID() };
   const area = root.querySelector("[data-editor]");
   area.replaceChildren();
   const form = el("form", { className: "sf-editor" });
-  form.append(el("strong", {}, node.id ? "\u7F16\u8F91\u8282\u70B9" : "\u65B0\u589E\u8282\u70B9"));
+  form.append(el("strong", {}, existing ? "\u7F16\u8F91\u8282\u70B9" : "\u65B0\u589E\u8282\u70B9"));
   const fields = el("div", { className: "sf-fields" });
   const protocolField = el("label", { className: "sf-field" });
   const protocol = el("select", { name: "protocol", className: "text_pole" });
@@ -795,8 +879,17 @@ function editor(node = {
   actions.append(
     save,
     button("xmark", "\u53D6\u6D88\u7F16\u8F91", () => {
+      if (savePromise) {
+        message("\u6B63\u5728\u4FDD\u5B58\uFF0C\u8BF7\u7A0D\u540E\u518D\u64CD\u4F5C");
+        return;
+      }
       area.replaceChildren();
       editorRead = null;
+      editorSync = null;
+      config = structuredClone(savedConfig);
+      dirty = false;
+      clearTimeout(saveTimer);
+      render();
     })
   );
   form.append(actions);
@@ -825,17 +918,29 @@ function editor(node = {
       stream: streamInput.checked
     };
   };
-  const stage = () => {
-    if (!form.reportValidity()) throw new Error("\u8BF7\u586B\u5199\u6709\u6548\u7684\u8282\u70B9\u8BBE\u7F6E");
+  const stage = (close = true) => {
+    if (!form.checkValidity()) throw new Error("\u8282\u70B9\u5C1A\u672A\u586B\u5B8C\u6574\uFF0C\u4FEE\u6539\u672A\u4FDD\u5B58");
     const updated = read();
     const i = config.nodes.findIndex((n) => n.id === node.id);
     if (i >= 0) config.nodes[i] = updated;
     else config.nodes.push(updated);
-    editorRead = null;
-    area.replaceChildren();
+    if (close) {
+      editorRead = null;
+      editorSync = null;
+      area.replaceChildren();
+    }
     dirty = true;
   };
   editorRead = stage;
+  editorSync = (updated) => {
+    const saved = updated.nodes.find((n) => n.id === node.id);
+    if (saved) {
+      node = { ...saved };
+      const field = form.querySelector('[name="key"]');
+      field.value = "";
+      field.placeholder = saved.keySet ? "\u5DF2\u4FDD\u5B58\uFF0C\u7559\u7A7A\u4E0D\u66F4\u6362" : "\u586B\u5199 API Key";
+    }
+  };
   form.addEventListener("input", (e) => {
     if (e.target.type === "search") return;
     dirty = true;
@@ -954,31 +1059,135 @@ async function saveConfig(changes) {
   markDirty();
 }
 function markDirty() {
-  root.querySelector("[data-dirty]").textContent = dirty ? "\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539" : "\u5DF2\u4FDD\u5B58";
+  root.querySelector("[data-dirty]").textContent = dirty ? "\u7B49\u5F85\u81EA\u52A8\u4FDD\u5B58" : "\u5DF2\u4FDD\u5B58";
+  if (dirty) {
+    editRevision++;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(
+      () => void commitSettings(false).catch((e) => {
+        root.querySelector("[data-dirty]").textContent = e.message || "\u81EA\u52A8\u4FDD\u5B58\u5931\u8D25\uFF0C\u4FEE\u6539\u4ECD\u4FDD\u7559";
+      }),
+      650
+    );
+  }
 }
-async function commitSettings() {
+async function commitSettings(closeEditor = true) {
+  clearTimeout(saveTimer);
+  if (savePromise) {
+    await savePromise;
+    if (dirty) return commitSettings(closeEditor);
+    if (closeEditor && editorRead) {
+      editorRead();
+      dirty = false;
+      render();
+    }
+    return;
+  }
+  if (!dirty && !editorRead) return;
   for (const input of root.querySelectorAll(
     '[data-controls] input[type="number"], [data-advanced] input[type="number"]'
   )) {
-    if (!input.disabled && (!input.value || !input.reportValidity()))
+    if (!input.disabled && (!input.value || !input.checkValidity()))
       throw new Error("\u8BF7\u586B\u5199\u8303\u56F4\u5185\u7684\u6570\u503C\u8BBE\u7F6E");
   }
-  editorRead?.();
-  const content = root.querySelector(".inline-drawer-content");
-  content.inert = true;
-  let updated;
+  editorRead?.(closeEditor);
+  const revision = editRevision;
+  const outgoing = structuredClone(config);
+  root.querySelector("[data-dirty]").textContent = "\u6B63\u5728\u4FDD\u5B58\u2026";
+  savePromise = (async () => {
+    const updated = await bridge.api("/config", outgoing);
+    savedConfig = structuredClone(updated);
+    config.revision = updated.revision;
+    if (revision === editRevision) {
+      config = updated;
+      dirty = false;
+      editorSync?.(updated);
+      if (!document.activeElement?.closest("[data-controls], [data-advanced]"))
+        render();
+      root.querySelector("[data-dirty]").textContent = "\u5DF2\u81EA\u52A8\u4FDD\u5B58";
+    }
+    updateReadiness();
+  })();
   try {
-    updated = await bridge.api("/config", config);
+    await savePromise;
   } finally {
-    content.inert = false;
+    savePromise = null;
   }
-  config = updated;
-  savedConfig = structuredClone(updated);
-  updateReadiness();
-  dirty = false;
-  render();
-  markDirty();
-  message("\u8BBE\u7F6E\u5DF2\u4FDD\u5B58");
+  if (dirty) return commitSettings(closeEditor);
+  if (closeEditor) {
+    render();
+    message("\u8BBE\u7F6E\u5DF2\u4FDD\u5B58");
+  }
+}
+async function presetAction(action, id) {
+  if (presetBusy) return;
+  presetBusy = true;
+  try {
+    let name;
+    if (["create", "copy", "rename"].includes(action)) {
+      name = await ctx().Popup.show.input(
+        "\u9884\u8BBE\u540D\u79F0",
+        "",
+        action === "rename" ? config.presetName : ""
+      );
+      if (!name?.trim()) return;
+    }
+    if (action === "delete" && await ctx().Popup.show.confirm("\u5220\u9664\u5F53\u524D\u9884\u8BBE", config.presetName) !== ctx().POPUP_RESULT.AFFIRMATIVE)
+      return;
+    root.querySelector(".inline-drawer-content").inert = true;
+    await commitSettings(true);
+    const updated = await bridge.api("/presets", {
+      action,
+      id,
+      name,
+      activePresetId: config.activePresetId,
+      revision: config.revision
+    });
+    config = updated;
+    savedConfig = structuredClone(updated);
+    dirty = false;
+    render();
+    updateReadiness();
+    panel.update(updated, await bridge.api("/records"));
+    message(`\u5F53\u524D\u9884\u8BBE\uFF1A${updated.presetName}\uFF0C\u5DF2\u4FDD\u5B58`);
+  } finally {
+    presetBusy = false;
+    root.querySelector(".inline-drawer-content").inert = false;
+    renderPresets();
+  }
+}
+function renderPresets() {
+  const area = root.querySelector("[data-presets]");
+  if (!area || !config) return;
+  area.replaceChildren();
+  const label = el("label", { className: "sf-field" });
+  const select = el("select", { className: "text_pole", disabled: presetBusy });
+  select.setAttribute("aria-label", "\u5F53\u524D\u9884\u8BBE");
+  for (const p of config.presets || [])
+    select.append(
+      el(
+        "option",
+        { value: p.id, selected: p.id === config.activePresetId },
+        p.name
+      )
+    );
+  select.onchange = () => void guarded(() => presetAction("activate", select.value));
+  label.append(el("span", {}, "\u5F53\u524D\u9884\u8BBE"), select);
+  area.append(label);
+  for (const [action, icon2, text] of [
+    ["create", "plus", "\u65B0\u5EFA\u9884\u8BBE"],
+    ["copy", "copy", "\u590D\u5236\u9884\u8BBE"],
+    ["rename", "pen", "\u91CD\u547D\u540D\u9884\u8BBE"],
+    ["delete", "trash", "\u5220\u9664\u9884\u8BBE"]
+  ]) {
+    const b = button(
+      icon2,
+      text,
+      () => void guarded(() => presetAction(action))
+    );
+    b.disabled = presetBusy || action === "delete" && config.presets?.length <= 1;
+    area.append(b);
+  }
 }
 async function runNodeTest(node) {
   const area = root.querySelector("[data-test]");
@@ -1086,6 +1295,7 @@ function renderNative() {
 }
 function render() {
   if (!config) return;
+  renderPresets();
   const controls = root.querySelector("[data-controls]");
   controls.replaceChildren();
   for (const [key, label] of [
@@ -1252,14 +1462,11 @@ function render() {
   ]) {
     const field = labelInput(label, key, config[key], "number", { min, max });
     field.querySelector("input").disabled = config.waitMode === "patient";
-    field.querySelector("input").onchange = (e) => void guarded(async () => {
-      if (!e.target.value || !e.target.checkValidity()) {
-        recordEvent("timeout_setting_rejected");
-        e.target.value = config[key];
-        throw new Error(`${label}\u5141\u8BB8 ${min}-${max}\uFF0C\u672A\u4FDD\u5B58\u8BE5\u4FEE\u6539`);
-      }
-      await saveConfig({ [key]: Number(e.target.value) });
-    });
+    field.querySelector("input").oninput = (e) => {
+      config[key] = Number(e.target.value);
+      dirty = true;
+      markDirty();
+    };
     advanced.append(field);
   }
   markDirty();
@@ -1363,7 +1570,11 @@ async function refreshRecords() {
     for (const a of r.attempts || []) {
       const line = el("div", { className: "sf-attempt" });
       line.append(
-        el("strong", {}, `\u7B2C ${a.round} \u8F6E \xB7 ${a.node} \xB7 ${a.model}`),
+        el(
+          "strong",
+          {},
+          `\u7B2C ${a.round} \u8F6E \xB7 ${a.node} \xB7 ${a.model}${r.presetName ? " \xB7 " + r.presetName : ""}`
+        ),
         el(
           "span",
           {},
@@ -1412,6 +1623,31 @@ ${a.code || ""} ${a.message}`
               `\u6B63\u6587 ${c.textChars} \u5B57\u7B26 \xB7 \u63A8\u7406 ${c.reasoningChars} \u5B57\u7B26 \xB7 \u7ED3\u675F\u539F\u56E0 ${c.finishReason}${c.refusal ? " \xB7 \u62D2\u7B54" : ""}`
             )
           );
+        if (d.usage) {
+          const labels = {
+            inputTokens: "\u8F93\u5165",
+            outputTokens: "\u8F93\u51FA",
+            totalTokens: "\u603B\u8BA1",
+            reasoningTokens: "\u63A8\u7406\uFF08\u542B\u4E8E\u8F93\u51FA\uFF09",
+            cacheReadTokens: "\u7F13\u5B58\u8BFB\u53D6\uFF08\u542B\u4E8E\u8F93\u5165\uFF09",
+            cacheWriteTokens: "\u7F13\u5B58\u5199\u5165\uFF08\u542B\u4E8E\u8F93\u5165\uFF09"
+          };
+          line.append(
+            el(
+              "p",
+              { className: "sf-token-usage" },
+              "Token \xB7 " + Object.entries(labels).filter(([key]) => d.usage[key] !== void 0).map(([key, label]) => `${label} ${d.usage[key]}`).join(" \xB7 ") + (d.usagePartial || a.state !== "succeeded" ? "\uFF08API \u5DF2\u62A5\u544A\uFF0C\u53EF\u80FD\u4E0D\u5B8C\u6574\uFF09" : "\uFF08API \u5DF2\u62A5\u544A\uFF09")
+            )
+          );
+        } else if (a.state === "succeeded" || c?.textChars || c?.reasoningChars) {
+          line.append(
+            el(
+              "p",
+              { className: "sf-muted sf-token-usage" },
+              a.state === "succeeded" ? "Token\uFF1AAPI \u672A\u8FD4\u56DE\u7528\u91CF" : "Token\uFF1A\u5DF2\u6536\u5230\u90E8\u5206\u56DE\u590D\uFF0CAPI \u672A\u8FD4\u56DE\u7528\u91CF\uFF0C\u53EF\u80FD\u5DF2\u8BA1\u8D39"
+            )
+          );
+        }
         if (d.bodyShape) line.append(el("p", {}, `\u54CD\u5E94\u7ED3\u6784\uFF1A${d.bodyShape}`));
         if (t)
           line.append(
@@ -1468,6 +1704,26 @@ async function updatePlugin() {
     b.disabled = false;
   }
 }
+async function checkNewVersion() {
+  try {
+    const result = await bridge.api("/update/check");
+    const newer = (a, b) => {
+      if (!/^\d+\.\d+\.\d+$/.test(a || "") || !/^\d+\.\d+\.\d+$/.test(b || ""))
+        return false;
+      const x = a.split(".").map(Number), y = b.split(".").map(Number);
+      for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+      return false;
+    };
+    const available = newer(result.latestVersion, VERSION) || newer(result.latestVersion, config?.version);
+    for (const badge of root.querySelectorAll("[data-new-version]")) {
+      badge.hidden = !available;
+      badge.title = `\u65B0\u7248\u672C ${result.latestVersion}${config?.canUpdate === false ? "\uFF0C\u8BF7\u8054\u7CFB\u9152\u9986\u7BA1\u7406\u5458\u66F4\u65B0" : ""}`;
+    }
+    if (available)
+      root.querySelector("[data-update]").title = `\u66F4\u65B0\u81F3 ${result.latestVersion}`;
+  } catch {
+  }
+}
 function watch(event, fn) {
   ctx().eventSource.on(event, fn);
   subscriptions.push([event, fn]);
@@ -1511,6 +1767,9 @@ async function boot() {
   root = el("div", { id: "silent-failover-settings" });
   root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>API\u8FD8\u6CA1\u6302</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><div class="sf-actions" data-actions></div><p class="sf-muted" data-status></p><div class="sf-controls" data-controls></div><div data-editor></div><div data-native></div><div data-nodes></div><details><summary>\u8D85\u65F6\u8BBE\u7F6E</summary><div class="sf-fields" data-advanced></div></details><details data-history><summary>\u8BF7\u6C42\u8BB0\u5F55</summary><div class="sf-actions" data-log-actions></div><div data-records></div></details></div></div>`;
   document.getElementById("extensions_settings2").append(root);
+  const presetArea = el("div", { className: "sf-presets" });
+  presetArea.dataset.presets = "";
+  root.querySelector("[data-controls]").before(presetArea);
   const actions = root.querySelector("[data-actions]");
   const dirtyStatus = el("p", { className: "sf-muted", role: "status" });
   dirtyStatus.dataset.dirty = "";
@@ -1518,14 +1777,18 @@ async function boot() {
   const testArea = el("div", { className: "sf-test-result" });
   testArea.dataset.test = "";
   root.querySelector("[data-editor]").after(testArea);
-  panel = createTaskPanel(bridge.api, () => {
-    root.querySelector(".inline-drawer-content").style.display = "block";
-    root.querySelector("[data-history]").open = true;
-    const drawer = root.closest(".drawer-content");
-    if (!drawer || getComputedStyle(drawer).display === "none")
-      document.getElementById("extensions-settings-button")?.querySelector(".drawer-toggle")?.click();
-    void refreshRecords();
-  });
+  panel = createTaskPanel(
+    bridge.api,
+    () => {
+      root.querySelector(".inline-drawer-content").style.display = "block";
+      root.querySelector("[data-history]").open = true;
+      const drawer = root.closest(".drawer-content");
+      if (!drawer || getComputedStyle(drawer).display === "none")
+        document.getElementById("extensions-settings-button")?.querySelector(".drawer-toggle")?.click();
+      void refreshRecords();
+    },
+    (id) => presetAction("activate", id)
+  );
   actions.append(
     button("plus", "\u65B0\u589E\u8282\u70B9", () => {
       if (config) editor();
@@ -1534,9 +1797,18 @@ async function boot() {
       "rotate",
       "\u5237\u65B0\u914D\u7F6E",
       () => void guarded(async () => {
-        if (dirty) throw new Error("\u6709\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\uFF0C\u8BF7\u5148\u4FDD\u5B58\u6216\u64A4\u9500");
+        if (savePromise) await savePromise;
+        if (dirty && await ctx().Popup.show.confirm(
+          "\u653E\u5F03\u672A\u4FDD\u5B58\u7684\u4FEE\u6539\u5E76\u5237\u65B0",
+          "\u5C06\u91CD\u65B0\u8BFB\u53D6\u670D\u52A1\u7AEF\u5DF2\u4FDD\u5B58\u7684\u914D\u7F6E"
+        ) !== ctx().POPUP_RESULT.AFFIRMATIVE)
+          return;
+        clearTimeout(saveTimer);
         config = await bridge.api("/config");
         savedConfig = structuredClone(config);
+        dirty = false;
+        editorRead = editorSync = null;
+        root.querySelector("[data-editor]").replaceChildren();
         updateReadiness();
         render();
         message("\u670D\u52A1\u7AEF\u5DF2\u8FDE\u63A5");
@@ -1561,9 +1833,15 @@ async function boot() {
   actions.append(
     saveButton,
     button("rotate-left", "\u64A4\u9500\u4FEE\u6539", () => {
+      if (savePromise) {
+        message("\u6B63\u5728\u4FDD\u5B58\uFF0C\u8BF7\u7A0D\u540E\u518D\u64CD\u4F5C");
+        return;
+      }
+      clearTimeout(saveTimer);
       config = structuredClone(savedConfig);
       dirty = false;
       editorRead = null;
+      editorSync = null;
       root.querySelector("[data-editor]").replaceChildren();
       render();
       message("\u5DF2\u64A4\u9500\u672A\u4FDD\u5B58\u7684\u4FEE\u6539");
@@ -1587,6 +1865,18 @@ async function boot() {
   );
   update.dataset.update = "";
   actions.append(update);
+  for (const parent of [
+    update,
+    root.querySelector(".inline-drawer-header b")
+  ]) {
+    const badge = el(
+      "span",
+      { className: "sf-new-badge", hidden: true },
+      "NEW"
+    );
+    badge.dataset.newVersion = "";
+    parent.append(badge);
+  }
   root.querySelector("[data-log-actions]").append(
     button("rotate", "\u5237\u65B0\u8BB0\u5F55", () => void refreshRecords()),
     button("download", "\u5BFC\u51FA\u8BCA\u65AD\u65E5\u5FD7", () => void guarded(exportDiagnostics)),
@@ -1625,6 +1915,12 @@ async function boot() {
   };
   window.addEventListener("pagehide", unload);
   subscriptions.push(["pagehide", unload]);
+  const flushHidden = () => {
+    if (document.hidden && dirty) void commitSettings(false).catch(() => {
+    });
+  };
+  window.addEventListener("visibilitychange", flushHidden);
+  subscriptions.push(["visibilitychange", flushHidden]);
   refreshTimer = setInterval(() => {
     renderNative();
     updateReadiness();
@@ -1653,6 +1949,8 @@ async function boot() {
     panel.update(config, await bridge.api("/records"));
     root.querySelector("[data-update]").disabled = config.canUpdate === false;
     if (config.updateSupported) {
+      void checkNewVersion();
+      updateTimer = setInterval(() => void checkNewVersion(), 864e5);
       const state = await bridge.api("/update/status");
       if (state.restartRequired)
         message(`\u5DF2\u5B89\u88C5 ${state.installedVersion}\uFF0C\u8BF7\u91CD\u542F\u9152\u9986\u540E\u53F0\u5E76\u5237\u65B0\u9875\u9762`);
@@ -1663,6 +1961,10 @@ async function boot() {
   });
 }
 async function onDisable() {
+  clearTimeout(saveTimer);
+  clearInterval(updateTimer);
+  if (savePromise) await savePromise.catch(() => {
+  });
   if (bridge && savedConfig)
     await bridge.api("/config", { ...savedConfig, enabled: false }).catch(() => {
     });
@@ -1673,7 +1975,8 @@ async function onDisable() {
   panel?.dispose();
   clearInterval(refreshTimer);
   for (const [event, fn] of subscriptions.splice(0)) {
-    if (event === "pagehide") window.removeEventListener(event, fn);
+    if (["pagehide", "visibilitychange"].includes(event))
+      window.removeEventListener(event, fn);
     else ctx().eventSource.removeListener(event, fn);
   }
   root?.remove();
@@ -1692,7 +1995,8 @@ bridge = installAdapter(
     },
     failed: restoreFailed,
     takePreferredNode: (generation) => panel?.takePreferredNode(generation),
-    config: () => savedConfig
+    config: () => savedConfig,
+    flush: () => commitSettings(false)
   }
 );
 ctx().eventSource.on(ctx().eventTypes.APP_READY, () => {

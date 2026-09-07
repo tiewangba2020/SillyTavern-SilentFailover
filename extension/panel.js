@@ -15,13 +15,32 @@ const icon = (name, title, action, touchLabel) => {
   b.onclick = action;
   return b;
 };
-export function createTaskPanel(api, openRecords) {
+export function createTaskPanel(
+  api,
+  openRecords,
+  switchPreset = async () => {},
+) {
   const panel = make("section", "sf-task-panel");
   panel.setAttribute("aria-label", "API还没挂任务");
   const header = make("header", "sf-panel-header");
   const title = make("strong", "", "API还没挂");
   header.append(make("i", "fa-solid fa-shuffle"), title);
   const body = make("div", "sf-panel-body");
+  const presets = make("select", "sf-panel-select");
+  presets.setAttribute("aria-label", "切换预设");
+  const presetLabel = make("label", "sf-panel-target");
+  presetLabel.append(make("span", "", "预设"), presets);
+  presets.onchange = async () => {
+    presets.disabled = true;
+    try {
+      await switchPreset(presets.value);
+    } catch (e) {
+      commandError = e.message;
+    } finally {
+      presets.disabled = false;
+      render();
+    }
+  };
   let hidden = false,
     collapsed = false,
     suppressPointerClick = false,
@@ -127,7 +146,7 @@ export function createTaskPanel(api, openRecords) {
   );
   stop.classList.add("sf-panel-stop");
   actions.append(targetLabel, switchButton, stop);
-  body.append(tasks, status, node, model, stats, actions);
+  body.append(presetLabel, tasks, status, node, model, stats, actions);
   panel.append(header, body);
   document.body.append(panel);
   panel.hidden = true;
@@ -229,6 +248,11 @@ export function createTaskPanel(api, openRecords) {
     tasks.hidden = active.length < 2;
     const a = job?.attempts?.at(-1);
     const running = !!job && ["running", "waiting"].includes(job.state);
+    fill(
+      presets,
+      (config?.presets || []).map((p) => [p.id, p.name]),
+      config?.activePresetId,
+    );
     const savedNodes = (config?.nodes || [])
       .filter((n) => n.enabled)
       .sort((a, b) => a.priority - b.priority);
@@ -253,6 +277,8 @@ export function createTaskPanel(api, openRecords) {
     stats.textContent = job
       ? `第 ${job.round}${job.maxRounds ? " / " + job.maxRounds : ""} 轮  ·  ${Math.max(0, Math.floor(((job.ended || Date.now()) - job.started) / 1000))} 秒  ·  ${job.attemptCount} 次尝试`
       : "";
+    if (running && job.presetId !== config?.activePresetId)
+      stats.textContent += ` · 本次使用 ${job.presetName}，新预设用于下次`;
     if (!running && preferred) {
       status.textContent = "下次生成已就绪";
       node.textContent = preferred.name;
@@ -289,10 +315,10 @@ export function createTaskPanel(api, openRecords) {
     switchText.textContent = running ? "切换 API" : "应用于下次生成";
     switchButton.title = switchText.textContent;
     switchButton.setAttribute("aria-label", switchText.textContent);
-    choose.disabled = commandBusy || !config?.enabled;
+    choose.disabled = commandBusy || (!running && !config?.enabled);
     switchButton.disabled =
       commandBusy ||
-      !config?.enabled ||
+      (!running && !config?.enabled) ||
       (running
         ? !choose.value || choose.value === a?.nodeId
         : choose.value === preferredNodeId);
@@ -382,6 +408,10 @@ export function createTaskPanel(api, openRecords) {
       return id;
     },
     update(nextConfig, nextRecords) {
+      if (config?.activePresetId !== nextConfig.activePresetId) {
+        preferredNodeId = "";
+        chooserContext = undefined;
+      }
       config = nextConfig;
       records = nextRecords;
       if (config.floatingWindow !== lastConfigVisible) hidden = false;

@@ -17,12 +17,14 @@ export async function mockProvider(port=0) {
     const fail=()=>{res.writeHead(node==='A'?401:503,{'Content-Type':'application/json'});res.end(JSON.stringify({error:{message:node==='A'?'Invalid API key test-only-A':'Provider unavailable',code:node==='A'?'invalid_api_key':'unavailable'}}));};
     if(mode==='slow'||mode==='manual'&&node==='A'){const t=setTimeout(fail,120000);res.on('close',()=>clearTimeout(t));return;}
     if(mode==='all-fail'||node==='A'||mode==='loop'&&calls.length<5){fail();return;}
+    if(mode==='usage-partial'&&node==='B'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.end('data: {"choices":[{"delta":{"content":"DO NOT DISPLAY PARTIAL"}}],"usage":{"prompt_tokens":100,"completion_tokens":5}}\n\n');return;}
     if(mode==='fallback'&&node==='B'){res.writeHead(200,{'Content-Type':'text/event-stream'});res.end('data: {"choices":[{"delta":{"content":"DO NOT DISPLAY PARTIAL"}}]}\n\n');return;}
     if(mode==='embedded'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({error:{message:'embedded failure'}}));return;}
     const result={id:'mock-result',object:'chat.completion',model:'mock-'+node,choices:[{index:0,message:{role:'assistant',content:'完整回复验证通过。'},finish_reason:'stop'}]};
+    if(mode.startsWith('usage')) result.usage={prompt_tokens:100,completion_tokens:20,total_tokens:120};
     if(!JSON.parse(body).stream){res.setHeader('Content-Type','application/json');res.end(JSON.stringify(result));return;}
     res.writeHead(200,{'Content-Type':'text/event-stream'});
-    const data=Buffer.from('data: '+JSON.stringify({id:'mock-result',choices:[{index:0,delta:{content:'完整回复验证通过。'},finish_reason:null}]})+'\n\ndata: '+JSON.stringify({choices:[{index:0,delta:{},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n');
+    const data=Buffer.from('data: '+JSON.stringify({id:'mock-result',choices:[{index:0,delta:{content:'完整回复验证通过。'},finish_reason:null}]})+'\n\ndata: '+JSON.stringify({choices:[{index:0,delta:{},finish_reason:'stop'}],...(result.usage?{usage:result.usage}:{})})+'\n\ndata: [DONE]\n\n');
     for(let i=0;i<data.length;i+=7)res.write(data.subarray(i,i+7));res.end();
   });
   await new Promise(r=>server.listen(port,'127.0.0.1',r));

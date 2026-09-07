@@ -6,7 +6,7 @@ test.use({
   isMobile: true,
 });
 
-test("applying and reopening a node retains its pending Key until settings are saved", async ({
+test("mobile clipboard Keys automatically save and survive blank re-edits", async ({
   page,
 }) => {
   await page.goto("/");
@@ -36,7 +36,7 @@ test("applying and reopening a node retains its pending Key until settings are s
   await expect(key).toHaveValue("test-draft-key-local-only");
   await root.getByRole("button", { name: "应用节点", exact: true }).click();
   const row = root.locator(".sf-node").filter({ hasText: name });
-  await expect(row).toContainText("Key 已填写（待保存）");
+  await expect(row).toContainText("Key 已保存");
   await row.getByRole("button", { name: `编辑 ${name}`, exact: true }).click();
   await expect(
     root.getByLabel("API Key（留空保留）", { exact: true }),
@@ -48,7 +48,7 @@ test("applying and reopening a node retains its pending Key until settings are s
   await root.getByRole("button", { name: "保存设置", exact: true }).click();
   expect(
     (await saveRequest).postDataJSON().nodes.find((n) => n.name === name).key,
-  ).toBe("test-draft-key-local-only");
+  ).toBe("");
   await expect(row).toContainText("Key 已保存");
   await page.reload();
   await page.locator("#extensions-settings-button .drawer-toggle").click();
@@ -58,12 +58,12 @@ test("applying and reopening a node retains its pending Key until settings are s
   await expect(
     root.getByLabel("API Key（留空保留）", { exact: true }),
   ).toHaveValue("");
-  // Replacement Keys must also survive another edit before the global save.
+  // Replacement Keys save automatically; subsequent blank edits retain them.
   await root
     .getByLabel("API Key（留空保留）", { exact: true })
     .fill("test-replacement-key-local-only");
   await root.getByRole("button", { name: "应用节点", exact: true }).click();
-  await expect(row).toContainText("Key 已填写（待保存）");
+  await expect(row).toContainText("Key 已保存");
   await row.getByRole("button", { name: `编辑 ${name}`, exact: true }).click();
   const replacement = page.waitForRequest(
     (r) => r.url().endsWith("/silent-failover/config") && r.method() === "POST",
@@ -71,6 +71,6 @@ test("applying and reopening a node retains its pending Key until settings are s
   await root.getByRole("button", { name: "保存设置", exact: true }).click();
   expect(
     (await replacement).postDataJSON().nodes.find((n) => n.name === name).key,
-  ).toBe("test-replacement-key-local-only");
+  ).toBe("");
   await expect(row).toContainText("Key 已保存");
 });

@@ -19,6 +19,12 @@ let savedConfig,
   dirty = false,
   editorRead,
   panel;
+let saveTimer,
+  savePromise,
+  editRevision = 0,
+  presetBusy = false,
+  editorSync;
+let updateTimer;
 const testControllers = new Set();
 const localRecords = [];
 const browserEvents = [];
@@ -125,10 +131,16 @@ function editor(
     stream: true,
   },
 ) {
+  if (editorRead) {
+    message("请先完成当前节点编辑");
+    return;
+  }
+  const existing = Boolean(node.id);
+  node = { ...node, id: node.id || crypto.randomUUID() };
   const area = root.querySelector("[data-editor]");
   area.replaceChildren();
   const form = el("form", { className: "sf-editor" });
-  form.append(el("strong", {}, node.id ? "编辑节点" : "新增节点"));
+  form.append(el("strong", {}, existing ? "编辑节点" : "新增节点"));
   const fields = el("div", { className: "sf-fields" });
   const protocolField = el("label", { className: "sf-field" });
   const protocol = el("select", { name: "protocol", className: "text_pole" });
@@ -202,8 +214,17 @@ function editor(
   actions.append(
     save,
     button("xmark", "取消编辑", () => {
+      if (savePromise) {
+        message("正在保存，请稍后再操作");
+        return;
+      }
       area.replaceChildren();
       editorRead = null;
+      editorSync = null;
+      config = structuredClone(savedConfig);
+      dirty = false;
+      clearTimeout(saveTimer);
+      render();
     }),
   );
   form.append(actions);
@@ -232,17 +253,29 @@ function editor(
       stream: streamInput.checked,
     };
   };
-  const stage = () => {
-    if (!form.reportValidity()) throw new Error("请填写有效的节点设置");
+  const stage = (close = true) => {
+    if (!form.checkValidity()) throw new Error("节点尚未填完整，修改未保存");
     const updated = read();
     const i = config.nodes.findIndex((n) => n.id === node.id);
     if (i >= 0) config.nodes[i] = updated;
     else config.nodes.push(updated);
-    editorRead = null;
-    area.replaceChildren();
+    if (close) {
+      editorRead = null;
+      editorSync = null;
+      area.replaceChildren();
+    }
     dirty = true;
   };
   editorRead = stage;
+  editorSync = (updated) => {
+    const saved = updated.nodes.find((n) => n.id === node.id);
+    if (saved) {
+      node = { ...saved };
+      const field = form.querySelector('[name="key"]');
+      field.value = "";
+      field.placeholder = saved.keySet ? "已保存，留空不更换" : "填写 API Key";
+    }
+  };
   form.addEventListener("input", (e) => {
     if (e.target.type === "search") return;
     dirty = true;
@@ -366,32 +399,146 @@ async function saveConfig(changes) {
 }
 function markDirty() {
   root.querySelector("[data-dirty]").textContent = dirty
-    ? "有未保存的修改"
+    ? "等待自动保存"
     : "已保存";
+  if (dirty) {
+    editRevision++;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(
+      () =>
+        void commitSettings(false).catch((e) => {
+          root.querySelector("[data-dirty]").textContent =
+            e.message || "自动保存失败，修改仍保留";
+        }),
+      650,
+    );
+  }
 }
-async function commitSettings() {
+async function commitSettings(closeEditor = true) {
+  clearTimeout(saveTimer);
+  if (savePromise) {
+    await savePromise;
+    if (dirty) return commitSettings(closeEditor);
+    if (closeEditor && editorRead) {
+      editorRead();
+      dirty = false;
+      render();
+    }
+    return;
+  }
+  if (!dirty && !editorRead) return;
   for (const input of root.querySelectorAll(
     '[data-controls] input[type="number"], [data-advanced] input[type="number"]',
   )) {
-    if (!input.disabled && (!input.value || !input.reportValidity()))
+    if (!input.disabled && (!input.value || !input.checkValidity()))
       throw new Error("请填写范围内的数值设置");
   }
-  editorRead?.();
-  const content = root.querySelector(".inline-drawer-content");
-  content.inert = true;
-  let updated;
+  editorRead?.(closeEditor);
+  const revision = editRevision;
+  const outgoing = structuredClone(config);
+  root.querySelector("[data-dirty]").textContent = "正在保存…";
+  savePromise = (async () => {
+    const updated = await bridge.api("/config", outgoing);
+    savedConfig = structuredClone(updated);
+    config.revision = updated.revision;
+    if (revision === editRevision) {
+      config = updated;
+      dirty = false;
+      editorSync?.(updated);
+      if (!document.activeElement?.closest("[data-controls], [data-advanced]"))
+        render();
+      // Keep focused numeric fields and the open node editor stable while typing.
+      root.querySelector("[data-dirty]").textContent = "已自动保存";
+    }
+    updateReadiness();
+  })();
   try {
-    updated = await bridge.api("/config", config);
+    await savePromise;
   } finally {
-    content.inert = false;
+    savePromise = null;
   }
-  config = updated;
-  savedConfig = structuredClone(updated);
-  updateReadiness();
-  dirty = false;
-  render();
-  markDirty();
-  message("设置已保存");
+  if (dirty) return commitSettings(closeEditor);
+  if (closeEditor) {
+    render();
+    message("设置已保存");
+  }
+}
+
+async function presetAction(action, id) {
+  if (presetBusy) return;
+  presetBusy = true;
+  try {
+    let name;
+    if (["create", "copy", "rename"].includes(action)) {
+      name = await ctx().Popup.show.input(
+        "预设名称",
+        "",
+        action === "rename" ? config.presetName : "",
+      );
+      if (!name?.trim()) return;
+    }
+    if (
+      action === "delete" &&
+      (await ctx().Popup.show.confirm("删除当前预设", config.presetName)) !==
+        ctx().POPUP_RESULT.AFFIRMATIVE
+    )
+      return;
+    root.querySelector(".inline-drawer-content").inert = true;
+    await commitSettings(true);
+    const updated = await bridge.api("/presets", {
+      action,
+      id,
+      name,
+      activePresetId: config.activePresetId,
+      revision: config.revision,
+    });
+    config = updated;
+    savedConfig = structuredClone(updated);
+    dirty = false;
+    render();
+    updateReadiness();
+    panel.update(updated, await bridge.api("/records"));
+    message(`当前预设：${updated.presetName}，已保存`);
+  } finally {
+    presetBusy = false;
+    root.querySelector(".inline-drawer-content").inert = false;
+    renderPresets();
+  }
+}
+function renderPresets() {
+  const area = root.querySelector("[data-presets]");
+  if (!area || !config) return;
+  area.replaceChildren();
+  const label = el("label", { className: "sf-field" });
+  const select = el("select", { className: "text_pole", disabled: presetBusy });
+  select.setAttribute("aria-label", "当前预设");
+  for (const p of config.presets || [])
+    select.append(
+      el(
+        "option",
+        { value: p.id, selected: p.id === config.activePresetId },
+        p.name,
+      ),
+    );
+  select.onchange = () =>
+    void guarded(() => presetAction("activate", select.value));
+  label.append(el("span", {}, "当前预设"), select);
+  area.append(label);
+  for (const [action, icon, text] of [
+    ["create", "plus", "新建预设"],
+    ["copy", "copy", "复制预设"],
+    ["rename", "pen", "重命名预设"],
+    ["delete", "trash", "删除预设"],
+  ]) {
+    const b = button(
+      icon,
+      text,
+      () => void guarded(() => presetAction(action)),
+    );
+    b.disabled =
+      presetBusy || (action === "delete" && config.presets?.length <= 1);
+    area.append(b);
+  }
 }
 async function runNodeTest(node) {
   const area = root.querySelector("[data-test]");
@@ -516,6 +663,7 @@ function renderNative() {
 }
 function render() {
   if (!config) return;
+  renderPresets();
   const controls = root.querySelector("[data-controls]");
   controls.replaceChildren();
   for (const [key, label] of [
@@ -691,15 +839,11 @@ function render() {
   ]) {
     const field = labelInput(label, key, config[key], "number", { min, max });
     field.querySelector("input").disabled = config.waitMode === "patient";
-    field.querySelector("input").onchange = (e) =>
-      void guarded(async () => {
-        if (!e.target.value || !e.target.checkValidity()) {
-          recordEvent("timeout_setting_rejected");
-          e.target.value = config[key];
-          throw new Error(`${label}允许 ${min}-${max}，未保存该修改`);
-        }
-        await saveConfig({ [key]: Number(e.target.value) });
-      });
+    field.querySelector("input").oninput = (e) => {
+      config[key] = Number(e.target.value);
+      dirty = true;
+      markDirty();
+    };
     advanced.append(field);
   }
   markDirty();
@@ -811,7 +955,11 @@ async function refreshRecords() {
     for (const a of r.attempts || []) {
       const line = el("div", { className: "sf-attempt" });
       line.append(
-        el("strong", {}, `第 ${a.round} 轮 · ${a.node} · ${a.model}`),
+        el(
+          "strong",
+          {},
+          `第 ${a.round} 轮 · ${a.node} · ${a.model}${r.presetName ? " · " + r.presetName : ""}`,
+        ),
         el(
           "span",
           {},
@@ -861,6 +1009,44 @@ async function refreshRecords() {
               `正文 ${c.textChars} 字符 · 推理 ${c.reasoningChars} 字符 · 结束原因 ${c.finishReason}${c.refusal ? " · 拒答" : ""}`,
             ),
           );
+        if (d.usage) {
+          const labels = {
+            inputTokens: "输入",
+            outputTokens: "输出",
+            totalTokens: "总计",
+            reasoningTokens: "推理（含于输出）",
+            cacheReadTokens: "缓存读取（含于输入）",
+            cacheWriteTokens: "缓存写入（含于输入）",
+          };
+          line.append(
+            el(
+              "p",
+              { className: "sf-token-usage" },
+              "Token · " +
+                Object.entries(labels)
+                  .filter(([key]) => d.usage[key] !== undefined)
+                  .map(([key, label]) => `${label} ${d.usage[key]}`)
+                  .join(" · ") +
+                (d.usagePartial || a.state !== "succeeded"
+                  ? "（API 已报告，可能不完整）"
+                  : "（API 已报告）"),
+            ),
+          );
+        } else if (
+          a.state === "succeeded" ||
+          c?.textChars ||
+          c?.reasoningChars
+        ) {
+          line.append(
+            el(
+              "p",
+              { className: "sf-muted sf-token-usage" },
+              a.state === "succeeded"
+                ? "Token：API 未返回用量"
+                : "Token：已收到部分回复，API 未返回用量，可能已计费",
+            ),
+          );
+        }
         if (d.bodyShape) line.append(el("p", {}, `响应结构：${d.bodyShape}`));
         if (t)
           line.append(
@@ -919,6 +1105,31 @@ async function updatePlugin() {
     b.disabled = false;
   }
 }
+async function checkNewVersion() {
+  try {
+    const result = await bridge.api("/update/check");
+    const newer = (a, b) => {
+      if (!/^\d+\.\d+\.\d+$/.test(a || "") || !/^\d+\.\d+\.\d+$/.test(b || ""))
+        return false;
+      const x = a.split(".").map(Number),
+        y = b.split(".").map(Number);
+      for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i];
+      return false;
+    };
+    const available =
+      newer(result.latestVersion, VERSION) ||
+      newer(result.latestVersion, config?.version);
+    for (const badge of root.querySelectorAll("[data-new-version]")) {
+      badge.hidden = !available;
+      badge.title = `新版本 ${result.latestVersion}${config?.canUpdate === false ? "，请联系酒馆管理员更新" : ""}`;
+    }
+    if (available)
+      root.querySelector("[data-update]").title =
+        `更新至 ${result.latestVersion}`;
+  } catch {
+    /* Update checks never interrupt generation or editing. */
+  }
+}
 function watch(event, fn) {
   ctx().eventSource.on(event, fn);
   subscriptions.push([event, fn]);
@@ -963,6 +1174,9 @@ async function boot() {
   root = el("div", { id: "silent-failover-settings" });
   root.innerHTML = `<div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>API还没挂</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div><div class="inline-drawer-content"><div class="sf-actions" data-actions></div><p class="sf-muted" data-status></p><div class="sf-controls" data-controls></div><div data-editor></div><div data-native></div><div data-nodes></div><details><summary>超时设置</summary><div class="sf-fields" data-advanced></div></details><details data-history><summary>请求记录</summary><div class="sf-actions" data-log-actions></div><div data-records></div></details></div></div>`;
   document.getElementById("extensions_settings2").append(root);
+  const presetArea = el("div", { className: "sf-presets" });
+  presetArea.dataset.presets = "";
+  root.querySelector("[data-controls]").before(presetArea);
   const actions = root.querySelector("[data-actions]");
   const dirtyStatus = el("p", { className: "sf-muted", role: "status" });
   dirtyStatus.dataset.dirty = "";
@@ -970,17 +1184,21 @@ async function boot() {
   const testArea = el("div", { className: "sf-test-result" });
   testArea.dataset.test = "";
   root.querySelector("[data-editor]").after(testArea);
-  panel = createTaskPanel(bridge.api, () => {
-    root.querySelector(".inline-drawer-content").style.display = "block";
-    root.querySelector("[data-history]").open = true;
-    const drawer = root.closest(".drawer-content");
-    if (!drawer || getComputedStyle(drawer).display === "none")
-      document
-        .getElementById("extensions-settings-button")
-        ?.querySelector(".drawer-toggle")
-        ?.click();
-    void refreshRecords();
-  });
+  panel = createTaskPanel(
+    bridge.api,
+    () => {
+      root.querySelector(".inline-drawer-content").style.display = "block";
+      root.querySelector("[data-history]").open = true;
+      const drawer = root.closest(".drawer-content");
+      if (!drawer || getComputedStyle(drawer).display === "none")
+        document
+          .getElementById("extensions-settings-button")
+          ?.querySelector(".drawer-toggle")
+          ?.click();
+      void refreshRecords();
+    },
+    (id) => presetAction("activate", id),
+  );
   actions.append(
     button("plus", "新增节点", () => {
       if (config) editor();
@@ -990,9 +1208,21 @@ async function boot() {
       "刷新配置",
       () =>
         void guarded(async () => {
-          if (dirty) throw new Error("有未保存的修改，请先保存或撤销");
+          if (savePromise) await savePromise;
+          if (
+            dirty &&
+            (await ctx().Popup.show.confirm(
+              "放弃未保存的修改并刷新",
+              "将重新读取服务端已保存的配置",
+            )) !== ctx().POPUP_RESULT.AFFIRMATIVE
+          )
+            return;
+          clearTimeout(saveTimer);
           config = await bridge.api("/config");
           savedConfig = structuredClone(config);
+          dirty = false;
+          editorRead = editorSync = null;
+          root.querySelector("[data-editor]").replaceChildren();
           updateReadiness();
           render();
           message("服务端已连接");
@@ -1018,9 +1248,15 @@ async function boot() {
   actions.append(
     saveButton,
     button("rotate-left", "撤销修改", () => {
+      if (savePromise) {
+        message("正在保存，请稍后再操作");
+        return;
+      }
+      clearTimeout(saveTimer);
       config = structuredClone(savedConfig);
       dirty = false;
       editorRead = null;
+      editorSync = null;
       root.querySelector("[data-editor]").replaceChildren();
       render();
       message("已撤销未保存的修改");
@@ -1044,6 +1280,18 @@ async function boot() {
   );
   update.dataset.update = "";
   actions.append(update);
+  for (const parent of [
+    update,
+    root.querySelector(".inline-drawer-header b"),
+  ]) {
+    const badge = el(
+      "span",
+      { className: "sf-new-badge", hidden: true },
+      "NEW",
+    );
+    badge.dataset.newVersion = "";
+    parent.append(badge);
+  }
   root.querySelector("[data-log-actions]").append(
     button("rotate", "刷新记录", () => void refreshRecords()),
     button("download", "导出诊断日志", () => void guarded(exportDiagnostics)),
@@ -1083,6 +1331,11 @@ async function boot() {
   };
   window.addEventListener("pagehide", unload);
   subscriptions.push(["pagehide", unload]);
+  const flushHidden = () => {
+    if (document.hidden && dirty) void commitSettings(false).catch(() => {});
+  };
+  window.addEventListener("visibilitychange", flushHidden);
+  subscriptions.push(["visibilitychange", flushHidden]);
   refreshTimer = setInterval(() => {
     renderNative();
     updateReadiness();
@@ -1113,6 +1366,8 @@ async function boot() {
     panel.update(config, await bridge.api("/records"));
     root.querySelector("[data-update]").disabled = config.canUpdate === false;
     if (config.updateSupported) {
+      void checkNewVersion();
+      updateTimer = setInterval(() => void checkNewVersion(), 86400000);
       const state = await bridge.api("/update/status");
       if (state.restartRequired)
         message(`已安装 ${state.installedVersion}，请重启酒馆后台并刷新页面`);
@@ -1123,6 +1378,9 @@ async function boot() {
   });
 }
 export async function onDisable() {
+  clearTimeout(saveTimer);
+  clearInterval(updateTimer);
+  if (savePromise) await savePromise.catch(() => {});
   if (bridge && savedConfig)
     await bridge
       .api("/config", { ...savedConfig, enabled: false })
@@ -1134,7 +1392,8 @@ export async function onDisable() {
   panel?.dispose();
   clearInterval(refreshTimer);
   for (const [event, fn] of subscriptions.splice(0)) {
-    if (event === "pagehide") window.removeEventListener(event, fn);
+    if (["pagehide", "visibilitychange"].includes(event))
+      window.removeEventListener(event, fn);
     else ctx().eventSource.removeListener(event, fn);
   }
   root?.remove();
@@ -1155,6 +1414,7 @@ bridge = installAdapter(
     failed: restoreFailed,
     takePreferredNode: (generation) => panel?.takePreferredNode(generation),
     config: () => savedConfig,
+    flush: () => commitSettings(false),
   },
 );
 ctx().eventSource.on(ctx().eventTypes.APP_READY, () => {

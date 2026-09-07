@@ -490,3 +490,32 @@
     touch-action: none;
   }
 }
+.sf-new-badge:not([hidden]) {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #bcebcf;
+  color: #163324;
+  font-size: 11px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+.sf-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: end;
+  margin-bottom: 10px;
+}
+.sf-presets .sf-field {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+.sf-presets select {
+  width: 100%;
+  min-width: 0;
+}
+.sf-token-usage {
+  overflow-wrap: anywhere;
+}

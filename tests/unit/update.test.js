@@ -75,12 +75,20 @@ function fixture(options = {}) {
   fs.mkdirSync(path.join(root, "data"));
   fs.writeFileSync(path.join(root, "data/config.json"), "private-preserve");
   const download = async (url) => {
+    if (url === `https://api.github.com/repos/${REPOSITORY}/releases/latest`)
+      return { tag_name: "v1.3.0", assets: [{ name: UPDATE_ASSET }] };
     expect(url).toBe(
       `https://github.com/${REPOSITORY}/releases/latest/download/${UPDATE_ASSET}`,
     );
     return bundle();
   };
-  const updater = new Updater({ root, serverDir, download, runningVersion: "1.2.0", ...options });
+  const updater = new Updater({
+    root,
+    serverDir,
+    download,
+    runningVersion: "1.2.0",
+    ...options,
+  });
   return { updater, root, serverDir, frontend };
 }
 test("validates versions, complete file allowlist, integrity and paired manifests", () => {
@@ -93,6 +101,27 @@ test("validates versions, complete file allowlist, integrity and paired manifest
   traversal.files[0].path = "../config.json";
   expect(() => validatePackage(traversal, "1.3.0")).toThrow("文件列表");
   expect(() => validatePackage(bundle(), "1.4.0")).toThrow("版本");
+});
+
+test("version checks share a cached metadata request and never install files", async () => {
+  const calls = [];
+  const { updater } = fixture({
+    download: async (url) => {
+      calls.push(url);
+      return { tag_name: "v1.9.0", assets: [{ name: UPDATE_ASSET }] };
+    },
+  });
+  const results = await Promise.all([
+    updater.check(),
+    updater.check(),
+    updater.check(),
+  ]);
+  expect(results.every((r) => r.available)).toBe(true);
+  await updater.check();
+  expect(calls).toEqual([
+    `https://api.github.com/repos/${REPOSITORY}/releases/latest`,
+  ]);
+  expect(updater.state.state).toBe("idle");
 });
 test("updates both components, preserves user data, backs up and requires restart", async () => {
   const { updater, root, serverDir, frontend } = fixture();

@@ -385,7 +385,7 @@ test("turning off loop while waiting stops without another round", async ({
   await expect
     .poll(async () => (await api(page, "/records"))[0]?.state)
     .toBe("waiting");
-  await api(page, "/config", { ...c, loop: false });
+  await api(page, "/config", { ...(await api(page, "/config")), loop: false });
   expect(await page.evaluate(() => window.sfTestGeneration)).toBe("AbortError");
   const r = (await api(page, "/records"))[0];
   expect(r.round).toBe(1);
@@ -493,14 +493,13 @@ test("changing chat cancels the current task without writing to the new chat", a
   await expect(page.locator("#chat")).not.toContainText("完整回复验证通过");
   await expect(page.locator("#toast-container .toast-error")).toHaveCount(0);
 });
-test("UI edits and priority changes persist only after explicit save", async ({
-  page,
-}) => {
+test("UI edits and priority changes save automatically", async ({ page }) => {
   const root = await open(page);
   const c = await api(page, "/config");
   await api(page, "/config", {
     ...c,
     enabled: false,
+    loop: false,
     nodes: [
       {
         name: "One",
@@ -528,8 +527,13 @@ test("UI edits and priority changes persist only after explicit save", async ({
   await root
     .getByRole("checkbox", { name: "自动循环重试", exact: true })
     .check();
-  await root.getByRole("button", { name: "保存设置", exact: true }).click();
   await expect.poll(async () => (await api(page, "/config")).loop).toBe(true);
+  await expect
+    .poll(
+      async () =>
+        (await api(page, "/config")).nodes.find((n) => n.name === "One").model,
+    )
+    .toBe("new-model");
 });
 
 test("draft model lookup and connectivity test work before saving and can be cancelled", async ({
@@ -555,7 +559,9 @@ test("draft model lookup and connectivity test work before saving and can be can
     })
     .click();
   await expect(root.locator("[data-test]")).toContainText("测试成功");
-  expect((await api(page, "/config")).nodes).toEqual(before.nodes);
+  await expect
+    .poll(async () => (await api(page, "/config")).nodes.length)
+    .toBe(before.nodes.length + 1);
   await page.request.post("http://127.0.0.1:9107/control", {
     data: { mode: "slow" },
   });

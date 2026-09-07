@@ -134,11 +134,42 @@ export class Updater {
     return { version: bundle.version, files };
   }
   async check() {
-    const release = await this.latest();
+    if (this.checkPromise) return this.checkPromise;
+    if (
+      this.checkedAt &&
+      Date.now() - this.checkedAt < (this.checkedVersion ? 86400000 : 300000)
+    ) {
+      if (!this.checkedVersion) throw new Error("更新检查暂不可用");
+      return this.checkResult();
+    }
+    this.checkPromise = (async () => {
+      try {
+        const release = await this.download(
+          `https://api.github.com/repos/${REPOSITORY}/releases/latest`,
+          256 * 1024,
+        );
+        const version = release?.tag_name?.replace(/^v/, "");
+        if (
+          !validVersion(version) ||
+          release.draft ||
+          release.prerelease ||
+          !release.assets?.some((a) => a.name === UPDATE_ASSET)
+        )
+          throw new Error("正式版信息无效");
+        this.checkedVersion = version;
+        return this.checkResult();
+      } finally {
+        this.checkedAt = Date.now();
+        this.checkPromise = null;
+      }
+    })();
+    return this.checkPromise;
+  }
+  checkResult() {
     return {
       ...this.state,
-      latestVersion: release.version,
-      available: newer(release.version, this.version),
+      latestVersion: this.checkedVersion,
+      available: newer(this.checkedVersion, this.version),
     };
   }
   targets(extensions) {

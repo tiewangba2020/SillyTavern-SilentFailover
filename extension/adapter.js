@@ -1,4 +1,5 @@
 export const ENDPOINT = "http://sillytavern-failover.invalid/v1";
+import { usageForHost } from "../server/usage.js";
 export const API = "/api/plugins/silent-failover";
 export const cancelled = () =>
   new DOMException("Silent failover stopped", "AbortError");
@@ -74,6 +75,7 @@ export function installAdapter(
       )
     )
       return previous(input, init);
+    await lifecycle.flush?.();
     const settings = await api("/config").catch(
       () => lifecycle.config?.() || null,
     );
@@ -142,9 +144,13 @@ export function installAdapter(
         }).catch(() => {});
         return response;
       };
-      if (!body.stream) return handoff(json(job.result));
+      if (!body.stream) {
+        const usage = usageForHost(job.result.tokenUsage);
+        return handoff(json({ ...job.result, ...(usage ? { usage } : {}) }));
+      }
       const choice = job.result.choices[0];
       const source = body.chat_completion_source;
+      const usage = usageForHost(job.result.tokenUsage, source);
       if (source === "claude" || source === "makersuite") {
         const message = choice.message;
         const chunks =
@@ -167,7 +173,11 @@ export function installAdapter(
                   index: 0,
                   delta: { type: "text_delta", text: message.content },
                 },
-                { type: "message_delta", delta: { stop_reason: "end_turn" } },
+                {
+                  type: "message_delta",
+                  delta: { stop_reason: "end_turn" },
+                  ...(usage ? { usage } : {}),
+                },
                 { type: "message_stop" },
               ]
             : [
@@ -190,6 +200,7 @@ export function installAdapter(
                     ]
                   : []),
                 {
+                  ...(usage ? { usageMetadata: usage } : {}),
                   candidates: [
                     {
                       content: { parts: [{ text: message.content }] },
@@ -212,6 +223,7 @@ export function installAdapter(
         id: job.result.id,
         object: "chat.completion.chunk",
         model: job.result.model,
+        ...(usage ? { usage } : {}),
         choices: [
           {
             index: 0,

@@ -47,6 +47,103 @@ async function withResponse(respond, run) {
   }
 }
 
+test("retains reported token usage and partial-text counts when a stream disconnects or is stopped", async () => {
+  for (const stop of [false, true]) {
+    const controller = new AbortController();
+    await withResponse(
+      (res) => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(
+          'data: {"choices":[{"delta":{"content":"private partial text"}}],"usage":{"prompt_tokens":100,"completion_tokens":12}}\n\n',
+        );
+        if (stop)
+          setTimeout(
+            () => controller.abort(new DOMException("stop", "AbortError")),
+            40,
+          );
+        else res.end();
+      },
+      async (fixtureNode) => {
+        const diagnostics = {};
+        await expect(
+          attempt(
+            fixtureNode,
+            payload,
+            controller.signal,
+            DEFAULTS,
+            null,
+            diagnostics,
+          ),
+        ).rejects.toBeDefined();
+        expect(diagnostics.usage).toEqual({
+          inputTokens: 100,
+          outputTokens: 12,
+        });
+        expect(diagnostics.usagePartial).toBe(true);
+        expect(diagnostics.completion.textChars).toBe(20);
+        expect(JSON.stringify(diagnostics)).not.toContain(
+          "private partial text",
+        );
+      },
+    );
+  }
+});
+
+test("keeps provider-reported usage even on an HTTP error without inventing a zero for missing usage", async () => {
+  await withResponse(
+    (res) => {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: { message: "upstream failed" },
+          usage: { prompt_tokens: 10 },
+        }),
+      );
+    },
+    async (fixtureNode) => {
+      const diagnostics = {};
+      await expect(
+        attempt(
+          fixtureNode,
+          payload,
+          new AbortController().signal,
+          DEFAULTS,
+          null,
+          diagnostics,
+        ),
+      ).rejects.toThrow();
+      expect(diagnostics.usage).toEqual({ inputTokens: 10 });
+    },
+  );
+});
+
+test("separate usage chunks retain known input and output counts", async () => {
+  await withResponse(
+    (res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(
+        'data: {"usage":{"prompt_tokens":100},"choices":[]}\n\ndata: {"usage":{"completion_tokens":8},"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+      );
+    },
+    async (fixtureNode) => {
+      const diagnostics = {};
+      const result = await attempt(
+        fixtureNode,
+        payload,
+        new AbortController().signal,
+        DEFAULTS,
+        null,
+        diagnostics,
+      );
+      expect(diagnostics.usage).toEqual({ inputTokens: 100, outputTokens: 8 });
+      expect(result.usage).toEqual({
+        prompt_tokens: 100,
+        completion_tokens: 8,
+      });
+    },
+  );
+});
+
 test("generation works independently of the host fetch dispatcher contract", async () => {
   mock.setMode("success");
   const incompatibleFetch = vi.fn(() => {

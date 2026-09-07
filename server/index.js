@@ -129,6 +129,19 @@ export async function init(router, options = {}) {
       );
     }),
   );
+  router.post(
+    "/presets",
+    route((req, res) => {
+      req.failover.store.changePreset(req.body);
+      res.json({
+        ...req.failover.store.publicConfig(),
+        version: VERSION,
+        updateSupported: true,
+        canUpdate: req.user?.profile?.admin === true,
+        nativeAvailable: Boolean(host?.readSecret),
+      });
+    }),
+  );
   router.get(
     "/jobs/:id",
     route((req, res) => {
@@ -222,8 +235,6 @@ export async function init(router, options = {}) {
     ),
   );
   router.get("/update/check", async (req, res) => {
-    if (req.user?.profile?.admin !== true)
-      return res.status(403).json({ error: "仅酒馆管理员可检查和安装更新" });
     try {
       res.json(await updater.check());
     } catch {

@@ -3,6 +3,7 @@ import { Failure } from "./errors.js";
 import { prepare, nativeCompletion } from "./protocols.js";
 import { completionSummary } from "./diagnostics.js";
 import { Agent, fetch } from "undici";
+import { tokenUsage } from "./usage.js";
 // Keep fetch and its dispatcher on the same Undici version across Node releases.
 const providerAgent = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
 const LIMIT = 8 * 1024 * 1024;
@@ -32,7 +33,9 @@ export function normalizeRequest(input) {
     input.custom_exclude_body?.trim() ||
     input.custom_include_headers?.trim()
   )
-    throw new Error("故障转移暂不支持酒馆自定义请求体和请求头，请在原生连接设置中检查这些参数");
+    throw new Error(
+      "故障转移暂不支持酒馆自定义请求体和请求头，请在原生连接设置中检查这些参数",
+    );
   const out = { messages: structuredClone(input.messages) };
   for (const name of [
     "temperature",
@@ -125,6 +128,7 @@ export async function attempt(
         )
       : null;
   let reader;
+  let captureProgress = () => {};
   try {
     arm(settings.headerSeconds, "headers");
     const prepared = prepare(node, payload, host);
@@ -170,6 +174,19 @@ export async function attempt(
     let refusal = "";
     let usage;
     let responseId;
+    captureProgress = () => {
+      const tokens = tokenUsage(usage, node.protocol);
+      if (tokens) diagnostics.usage = tokens;
+      if (content || reasoning || refusal)
+        diagnostics.completion = completionSummary({
+          choices: [
+            {
+              message: { content, reasoning_content: reasoning, refusal },
+              finish_reason: finish,
+            },
+          ],
+        });
+    };
     const isSse = response.ok && mime === "text/event-stream";
     diagnostics.parser = isSse ? "sse" : "json";
     const parser = createParser({
@@ -187,11 +204,17 @@ export async function attempt(
             phase: "parse",
           });
         }
+        const reported =
+          node.protocol === "gemini"
+            ? data.usageMetadata
+            : data.usage || data.message?.usage;
+        if (reported) usage = { ...usage, ...reported };
+        captureProgress();
         if (data.error) throw providerFailure(data, 200, "stream");
         if (node.protocol === "claude") {
           if (data.type === "message_start") {
             responseId = data.message?.id;
-            usage = data.message?.usage;
+            usage = { ...usage, ...data.message?.usage };
           }
           if (data.type === "content_block_start") {
             if (
@@ -226,11 +249,11 @@ export async function attempt(
           if (choice?.message?.content || choice?.message?.reasoning_content)
             arm(settings.idleSeconds, "idle");
           if (choice?.finish_reason) finish = choice.finish_reason;
-          if (parsed.usage) usage = parsed.usage;
+          if (parsed.usage) usage = { ...usage, ...parsed.usage };
           if (parsed.id) responseId = parsed.id;
           return;
         }
-        if (data.usage) usage = data.usage;
+        if (data.usage) usage = { ...usage, ...data.usage };
         if (data.id) responseId = data.id;
         const c = data.choices?.[0];
         if (!c) return;
@@ -270,6 +293,7 @@ export async function attempt(
       const decoded = decoder.decode(chunk.value, { stream: true });
       if (isSse) {
         parser.feed(decoded);
+        captureProgress();
         if (done) break;
       } else {
         text += decoded;
@@ -290,6 +314,11 @@ export async function attempt(
         data = { message: "API returned a non-JSON error response" };
       }
       const error = providerFailure(data, response.status);
+      const reported = tokenUsage(
+        node.protocol === "gemini" ? data?.usageMetadata : data?.usage,
+        node.protocol,
+      );
+      if (reported) diagnostics.usage = reported;
       const retry = response.headers.get("retry-after");
       if (retry) {
         const seconds = Number(retry);
@@ -354,10 +383,17 @@ export async function attempt(
       : data && typeof data === "object"
         ? "object"
         : "scalar";
+    const tokens = tokenUsage(
+      node.protocol === "gemini" ? data?.usageMetadata : data?.usage,
+      node.protocol,
+    );
+    if (tokens) diagnostics.usage = tokens;
     const completion = nativeCompletion(data, node.protocol);
     diagnostics.completion = completionSummary(completion);
     return validate(completion);
   } catch (error) {
+    captureProgress();
+    if (diagnostics.usage) diagnostics.usagePartial = true;
     if (signal.aborted) throw signal.reason;
     throw error;
   } finally {
