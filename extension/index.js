@@ -2,6 +2,7 @@ import { API, ENDPOINT, installAdapter } from "./adapter.js";
 import { VERSION } from "../server/version.js";
 import { createTaskPanel } from "./panel.js";
 import { completeApiUrl } from "../server/url.js";
+import { requestId } from "./browser-compat.js";
 const ctx = () => SillyTavern.getContext();
 const STATES = {
   running: "尝试中",
@@ -11,6 +12,11 @@ const STATES = {
   exhausted: "本轮已耗尽",
   cancelled: "已取消",
   invalid: "未执行",
+};
+const ADJUSTMENTS = {
+  temperature: "温度",
+  max_tokens: "输出上限",
+  trailing_model_turn: "末尾模型轮次",
 };
 let bridge, root, config, refreshTimer, snapshot;
 let hostConnection;
@@ -136,7 +142,7 @@ function editor(
     return;
   }
   const existing = Boolean(node.id);
-  node = { ...node, id: node.id || crypto.randomUUID() };
+  node = { ...node, id: node.id || requestId() };
   const area = root.querySelector("[data-editor]");
   area.replaceChildren();
   const form = el("form", { className: "sf-editor" });
@@ -232,7 +238,7 @@ function editor(
     const data = new FormData(form);
     return {
       ...node,
-      id: node.id || crypto.randomUUID(),
+      id: node.id || requestId(),
       name: data.get("name"),
       url: (() => {
         try {
@@ -546,7 +552,7 @@ async function runNodeTest(node) {
     message("已有连通性测试正在进行，请先停止");
     return;
   }
-  const id = crypto.randomUUID(),
+  const id = requestId(),
     controller = new AbortController();
   testControllers.add(controller);
   const started = Date.now();
@@ -971,7 +977,7 @@ async function refreshRecords() {
           el(
             "p",
             { className: "sf-muted" },
-            `${adjustment.parameter === "temperature" ? "温度" : "输出上限"}：${adjustment.from ?? "默认"} → ${adjustment.to}（${adjustment.reason}）`,
+            `${ADJUSTMENTS[adjustment.parameter] || adjustment.parameter}：${adjustment.from ?? "默认"} → ${adjustment.to}（${adjustment.reason}）`,
           ),
         );
       if (a.message)

@@ -1,5 +1,5 @@
 import { test, expect } from "vitest";
-import { adaptParameters } from "../../server/parameters.js";
+import { adaptParameters, rejectsTrailingModelTurn } from "../../server/parameters.js";
 import { prepare } from "../../server/protocols.js";
 import { failureRecord } from "../../server/errors.js";
 
@@ -58,4 +58,119 @@ test("Chinese precharge failures are classified as quota, not permission", () =>
       [],
     ).category,
   ).toBe("quota");
+});
+test("only the Gemini models that enforce turn validation are matched", () => {
+  for (const model of [
+    "gemini-3.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.7-flash",
+    "gemini-3.8-flash",
+    "[按次]gemini-3.8-flash",
+    "google/gemini-3.6-flash",
+    "gemini-3.9-flash",
+    "gemini-4.0-flash",
+  ])
+    expect(rejectsTrailingModelTurn(model), model).toBe(true);
+  for (const model of [
+    "gemini-3.1-pro-high",
+    "gemini-3.5-flash",
+    "gemini-3-flash",
+    "gemini-2.5-pro",
+    "gemini-1.5-flash",
+    "gpt-4o",
+    "claude-opus-4-6",
+  ])
+    expect(rejectsTrailingModelTurn(model), model).toBe(false);
+});
+test("Gemini models that reject a trailing model turn get it converted to a user turn", () => {
+  const trailing = {
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "prefill" },
+    ],
+  };
+  for (const model of [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.7-flash",
+  ]) {
+    const node = {
+      model,
+      protocol: "openai",
+      url: "https://example.com/v1",
+      key: "test",
+    };
+    const result = adaptParameters(node, trailing);
+    expect(result.payload.messages.at(-1).role).toBe("user");
+    expect(result.adjustments).toEqual([
+      {
+        parameter: "trailing_model_turn",
+        from: "assistant",
+        to: "user",
+        reason: "该 Gemini 模型不接受以模型轮结尾的请求",
+      },
+    ]);
+    expect(prepare(node, trailing).body.messages.at(-1).role).toBe("user");
+  }
+  expect(trailing.messages.at(-1).role).toBe("assistant");
+});
+test("models that still accept a prefill keep the trailing model turn", () => {
+  const trailing = { messages: [{ role: "assistant", content: "prefill" }] };
+  for (const model of [
+    "gemini-3.1-pro-high",
+    "gemini-3.5-flash",
+    "gemini-2.5-pro",
+    "gpt-4o",
+    "claude-opus-4-6",
+  ])
+    expect(
+      adaptParameters({ model, protocol: "openai" }, trailing).adjustments,
+    ).toEqual([]);
+  expect(
+    adaptParameters(
+      { model: "gemini-3.8-flash", protocol: "openai" },
+      {
+        messages: [
+          { role: "assistant", content: "a" },
+          { role: "user", content: "b" },
+        ],
+      },
+    ).adjustments,
+  ).toEqual([]);
+});
+test("native Gemini nodes lose the trailing model turn before role conversion", () => {
+  const host = {
+    getPromptNames: () => ({
+      charName: "Char",
+      userName: "User",
+      groupNames: [],
+      startsWithGroupName: () => false,
+    }),
+    convertGooglePrompt: (messages) => ({
+      contents: messages.map((m) => ({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: [{ text: m.content }],
+      })),
+      system_instruction: { parts: [] },
+    }),
+    calculateGoogleBudgetTokens: () => null,
+    safety: [],
+  };
+  const node = {
+    model: "gemini-3.8-flash",
+    protocol: "gemini",
+    url: "https://generativelanguage.googleapis.com",
+    key: "test",
+  };
+  const body = prepare(
+    node,
+    {
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "prefill" },
+      ],
+    },
+    host,
+  ).body;
+  expect(body.contents.at(-1).role).toBe("user");
 });

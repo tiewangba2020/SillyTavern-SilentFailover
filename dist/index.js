@@ -32,6 +32,38 @@ function usageForHost(usage, source = "openai") {
   );
 }
 
+// extension/browser-compat.js
+function requestId() {
+  if (typeof globalThis.crypto?.randomUUID === "function")
+    return globalThis.crypto.randomUUID();
+  if (typeof globalThis.crypto?.getRandomValues !== "function")
+    throw new Error("\u6D4F\u89C8\u5668\u4E0D\u652F\u6301\u5B89\u5168\u968F\u673A\u6570\uFF0C\u8BF7\u66F4\u65B0\u6D4F\u89C8\u5668\u540E\u91CD\u8BD5");
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = bytes[6] & 15 | 64;
+  bytes[8] = bytes[8] & 63 | 128;
+  const hex = [...bytes].map((n) => n.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function requestDeadline(parent, milliseconds = 12e3) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(
+    parent.reason || new DOMException("\u8BF7\u6C42\u5DF2\u53D6\u6D88", "AbortError")
+  );
+  const timer = setTimeout(
+    () => controller.abort(new DOMException("\u8FDE\u63A5\u63D2\u4EF6\u670D\u52A1\u7AEF\u8D85\u65F6", "TimeoutError")),
+    milliseconds
+  );
+  if (parent?.aborted) abort();
+  else parent?.addEventListener("abort", abort, { once: true });
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timer);
+      parent?.removeEventListener("abort", abort);
+    }
+  };
+}
+
 // extension/adapter.js
 var ENDPOINT = "http://sillytavern-failover.invalid/v1";
 var API = "/api/plugins/silent-failover";
@@ -60,18 +92,42 @@ function installAdapter(context, onLocalRecord = () => {
   const active = /* @__PURE__ */ new Map();
   let disposed = false;
   async function api(path, body, signal) {
-    const response = await previous(API + path, {
-      method: body === void 0 ? "GET" : "POST",
-      headers: context().getRequestHeaders(),
-      ...body === void 0 ? {} : { body: JSON.stringify(body) },
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(12e3)]) : AbortSignal.timeout(12e3)
-    });
-    const data = await response.json();
-    if (!response.ok)
-      throw Object.assign(new Error(data.error || "\u670D\u52A1\u7AEF\u8BF7\u6C42\u5931\u8D25"), {
-        status: response.status
+    const deadline = requestDeadline(signal);
+    try {
+      const response = await previous(API + path, {
+        method: body === void 0 ? "GET" : "POST",
+        headers: context().getRequestHeaders(),
+        ...body === void 0 ? {} : { body: JSON.stringify(body) },
+        signal: deadline.signal
       });
-    return data;
+      const statusMessage = {
+        401: "\u9152\u9986\u767B\u5F55\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u540E\u5237\u65B0\u9875\u9762",
+        403: "\u9152\u9986\u62D2\u7EDD\u4E86\u63D2\u4EF6\u8BF7\u6C42\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u767B\u5F55\uFF0C\u5E76\u68C0\u67E5\u8BBF\u95EE\u6743\u9650\u6216 CSRF \u9519\u8BEF",
+        404: "\u6B64\u9152\u9986\u672A\u627E\u5230\u63D2\u4EF6\u670D\u52A1\u7AEF\uFF0C\u8BF7\u786E\u8BA4\u4E24\u90E8\u5206\u5B89\u88C5\u5728\u624B\u673A\u8BBF\u95EE\u7684\u540C\u4E00\u4E2A\u9152\u9986\u4E2D\uFF0C\u5E76\u91CD\u542F\u9152\u9986\u540E\u53F0"
+      }[response.status];
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        if (deadline.signal.aborted) throw deadline.signal.reason;
+        throw Object.assign(
+          new Error(
+            statusMessage || "\u670D\u52A1\u7AEF\u8FD4\u56DE\u7684\u4E0D\u662F\u6709\u6548 JSON\uFF0C\u8BF7\u68C0\u67E5\u767B\u5F55\u72B6\u6001\u3001\u4EE3\u7406\u8BBE\u7F6E\u548C\u9152\u9986\u540E\u53F0\u65E5\u5FD7"
+          ),
+          { status: response.status }
+        );
+      }
+      if (!response.ok)
+        throw Object.assign(
+          new Error(statusMessage || data?.error || "\u670D\u52A1\u7AEF\u8BF7\u6C42\u5931\u8D25"),
+          {
+            status: response.status
+          }
+        );
+      return data;
+    } finally {
+      deadline.dispose();
+    }
   }
   async function wrapper(input, init) {
     const url = new URL(
@@ -96,7 +152,7 @@ function installAdapter(context, onLocalRecord = () => {
     );
     if (!settings?.enabled) return previous(input, init);
     const nativeFirst = settings.nativeFirst !== false;
-    const id = crypto.randomUUID();
+    const id = requestId();
     const saved = lifecycle.start?.();
     const preferredNodeId = lifecycle.takePreferredNode?.(saved?.type);
     const controller = new AbortController();
@@ -293,7 +349,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.5.0";
+var VERSION = "1.5.1";
 
 // extension/panel.js
 var make = (tag, cls, text) => {
@@ -690,6 +746,11 @@ var STATES = {
   cancelled: "\u5DF2\u53D6\u6D88",
   invalid: "\u672A\u6267\u884C"
 };
+var ADJUSTMENTS = {
+  temperature: "\u6E29\u5EA6",
+  max_tokens: "\u8F93\u51FA\u4E0A\u9650",
+  trailing_model_turn: "\u672B\u5C3E\u6A21\u578B\u8F6E\u6B21"
+};
 var bridge;
 var root;
 var config;
@@ -805,7 +866,7 @@ function editor(node = {
     return;
   }
   const existing = Boolean(node.id);
-  node = { ...node, id: node.id || crypto.randomUUID() };
+  node = { ...node, id: node.id || requestId() };
   const area = root.querySelector("[data-editor]");
   area.replaceChildren();
   const form = el("form", { className: "sf-editor" });
@@ -897,7 +958,7 @@ function editor(node = {
     const data = new FormData(form);
     return {
       ...node,
-      id: node.id || crypto.randomUUID(),
+      id: node.id || requestId(),
       name: data.get("name"),
       url: (() => {
         try {
@@ -1195,7 +1256,7 @@ async function runNodeTest(node) {
     message("\u5DF2\u6709\u8FDE\u901A\u6027\u6D4B\u8BD5\u6B63\u5728\u8FDB\u884C\uFF0C\u8BF7\u5148\u505C\u6B62");
     return;
   }
-  const id = crypto.randomUUID(), controller = new AbortController();
+  const id = requestId(), controller = new AbortController();
   testControllers.add(controller);
   const started = Date.now();
   area.replaceChildren();
@@ -1586,7 +1647,7 @@ async function refreshRecords() {
           el(
             "p",
             { className: "sf-muted" },
-            `${adjustment.parameter === "temperature" ? "\u6E29\u5EA6" : "\u8F93\u51FA\u4E0A\u9650"}\uFF1A${adjustment.from ?? "\u9ED8\u8BA4"} \u2192 ${adjustment.to}\uFF08${adjustment.reason}\uFF09`
+            `${ADJUSTMENTS[adjustment.parameter] || adjustment.parameter}\uFF1A${adjustment.from ?? "\u9ED8\u8BA4"} \u2192 ${adjustment.to}\uFF08${adjustment.reason}\uFF09`
           )
         );
       if (a.message)

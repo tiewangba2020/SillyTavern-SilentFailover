@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.0.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.1.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -203,9 +203,9 @@ volumes:
 
 ```bash
 docker compose stop sillytavern
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.0/SillyTavern-SilentFailover-v1.5.0.zip -o SillyTavern-SilentFailover-v1.5.0.zip
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.0/SHA256SUMS-1.5.0 -o SHA256SUMS-1.5.0
-sha256sum --check --ignore-missing SHA256SUMS-1.5.0 && unzip SillyTavern-SilentFailover-v1.5.0.zip -d api-still-up-package
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.1/SillyTavern-SilentFailover-v1.5.1.zip -o SillyTavern-SilentFailover-v1.5.1.zip
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.1/SHA256SUMS-1.5.1 -o SHA256SUMS-1.5.1
+sha256sum --check --ignore-missing SHA256SUMS-1.5.1 && unzip SillyTavern-SilentFailover-v1.5.1.zip -d api-still-up-package
 docker compose run --rm --no-deps --entrypoint node -v "$PWD/api-still-up-package:/tmp/api-still-up-package:ro" sillytavern /tmp/api-still-up-package/install.mjs --target /home/node/app --config /home/node/app/config/config.yaml
 docker compose up -d sillytavern
 ```
@@ -377,6 +377,24 @@ docker compose up -d sillytavern
 如果记录中出现 `UND_ERR_INVALID_ARG` 和 `fetch failed: invalid onError method`，这是旧版插件请求库与部分 Node.js 内置网络库的兼容问题，通常没有收到 HTTP 响应，不能据此判断 Key 无效。
 
 **请将前端和服务端一起更新至 1.4.3 或更新版本，重启酒馆后台，再刷新网页。** 新版生成请求使用插件自带的配套请求库和连接池，避免混用不同版本；无需手动安装 Undici。增加超时或循环次数不能解决此报错。如果升级后仍失败，请导出新请求的诊断记录。
+
+### 备用节点提示 `Requests ending with a model turn are not supported.`？
+
+这是 Gemini 3 及以后模型的新限制：请求不能以模型轮次（assistant）结尾。酒馆自带的同类修正只覆盖一小批旧模型（如 `gemini-3.6-flash`、`gemini-3.7-flash`），而且只在酒馆原生 Gemini 连接里生效；备用节点走 OpenAI 兼容中转时完全不经过那段代码，所以 `gemini-3.8-flash` 一类模型会直接返回 400。
+
+插件在发送前会自动判断：节点模型属于**已经开始强制这条校验的 Gemini 型号**时，把结尾的模型轮次改为用户轮次，并在请求记录里标注这次调整。目前覆盖 `gemini-3.5-flash-lite`、`gemini-3.6-flash`、`gemini-3.7-flash`、`gemini-3.8-flash` 以及更新的 flash／lite 型号；Gemini 原生节点和 OpenAI 兼容中转节点都算。
+
+Google 是按型号逐个收紧的，不是按大版本一刀切，所以插件也照这个粒度判断：`gemini-3.1-pro`、`gemini-3.5-flash`、`gemini-2.5` 等仍支持预填充的型号不做改动，继续生成时照旧接着往下写。如果某个型号仍然报同样的错，说明它已被 Google 收紧但不在上面的范围内，请反馈型号名称。
+
+这不是酒馆原生插头的“提示词后处理”能解决的问题：严格和半严格模式只合并相邻同角色消息、补首条用户占位，不会改动结尾那一条。
+
+### 手机能打开局域网酒馆，但插件显示服务端连接失败？
+
+插件服务端运行在电脑上的酒馆里，手机不需要另装服务端。插件请求使用当前酒馆页面的同源地址，不会把手机的 `localhost` 当成电脑地址。
+
+先确认电脑与手机打开的是同一台电脑、同一端口的酒馆，并查看插件面板的完整报错。`404` 通常表示该实例没有加载插件服务端；`401` 表示登录失效；`403` 可能涉及权限或 CSRF 校验，先刷新重新登录，并检查电脑后台日志。酒馆页面能打开，不等于插件服务端已正确安装加载。
+
+普通 `http://局域网IP:端口` 与电脑上的 `localhost` 属于不同的浏览器安全环境。若出现 `crypto.randomUUID is not a function` 或 `AbortSignal.any/timeout is not a function`，属于浏览器接口兼容问题，不是 Key 失效。反馈时附上插件前后端版本、手机浏览器名称及完整错误文字，不要公开 Key。
 
 ### 酒馆原来的 API 设置去哪了？
 

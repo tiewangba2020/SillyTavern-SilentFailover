@@ -1,5 +1,6 @@
 export const ENDPOINT = "http://sillytavern-failover.invalid/v1";
 import { usageForHost } from "../server/usage.js";
+import { requestId, requestDeadline } from "./browser-compat.js";
 export const API = "/api/plugins/silent-failover";
 export const cancelled = () =>
   new DOMException("Silent failover stopped", "AbortError");
@@ -32,20 +33,43 @@ export function installAdapter(
   const active = new Map();
   let disposed = false;
   async function api(path, body, signal) {
-    const response = await previous(API + path, {
-      method: body === undefined ? "GET" : "POST",
-      headers: context().getRequestHeaders(),
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(12000)])
-        : AbortSignal.timeout(12000),
-    });
-    const data = await response.json();
-    if (!response.ok)
-      throw Object.assign(new Error(data.error || "服务端请求失败"), {
-        status: response.status,
+    const deadline = requestDeadline(signal);
+    try {
+      const response = await previous(API + path, {
+        method: body === undefined ? "GET" : "POST",
+        headers: context().getRequestHeaders(),
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: deadline.signal,
       });
-    return data;
+      const statusMessage = {
+        401: "酒馆登录已失效，请重新登录后刷新页面",
+        403: "酒馆拒绝了插件请求，请刷新页面重新登录，并检查访问权限或 CSRF 错误",
+        404: "此酒馆未找到插件服务端，请确认两部分安装在手机访问的同一个酒馆中，并重启酒馆后台",
+      }[response.status];
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        if (deadline.signal.aborted) throw deadline.signal.reason;
+        throw Object.assign(
+          new Error(
+            statusMessage ||
+              "服务端返回的不是有效 JSON，请检查登录状态、代理设置和酒馆后台日志",
+          ),
+          { status: response.status },
+        );
+      }
+      if (!response.ok)
+        throw Object.assign(
+          new Error(statusMessage || data?.error || "服务端请求失败"),
+          {
+            status: response.status,
+          },
+        );
+      return data;
+    } finally {
+      deadline.dispose();
+    }
   }
   async function wrapper(input, init) {
     const url = new URL(
@@ -81,7 +105,7 @@ export function installAdapter(
     );
     if (!settings?.enabled) return previous(input, init);
     const nativeFirst = settings.nativeFirst !== false;
-    const id = crypto.randomUUID();
+    const id = requestId();
     const saved = lifecycle.start?.();
     const preferredNodeId = lifecycle.takePreferredNode?.(saved?.type);
     const controller = new AbortController();
