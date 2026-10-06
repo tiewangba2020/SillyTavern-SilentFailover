@@ -24,6 +24,27 @@ const delay = (ms, signal) =>
     };
     signal?.addEventListener("abort", abort, { once: true });
   });
+// 酒馆自己的生成路径（openai.js 的 sendOpenAIRequest）会先发 CHAT_COMPLETION_SETTINGS_READY，
+// 紧接着才 fetch /api/backends/chat-completions/generate；别的扩展借道
+// ChatCompletionService / ConnectionManagerRequestService 打同一个端点时不会发这个事件。
+// 用它把「酒馆主生成」和「扩展自建的独立请求」区分开，后者必须原样放行，否则会抢走对方的 API 配置。
+export const HOST_GENERATION_WINDOW_MS = 15000;
+export function shouldIntercept(
+  body,
+  pendingAt,
+  discriminatorAvailable,
+  now = Date.now(),
+) {
+  if (
+    !["custom", "openai", "claude", "makersuite"].includes(
+      body?.chat_completion_source,
+    )
+  )
+    return false;
+  // 旧版酒馆没有该事件，无法区分来源，退回「全部接管」的原行为。
+  if (!discriminatorAvailable) return true;
+  return pendingAt !== 0 && now - pendingAt < HOST_GENERATION_WINDOW_MS;
+}
 export function installAdapter(
   context,
   onLocalRecord = () => {},
@@ -32,6 +53,27 @@ export function installAdapter(
   const previous = window.fetch;
   const active = new Map();
   let disposed = false;
+  const eventTypes = context().eventTypes || {};
+  const hostReadyEvent = eventTypes.CHAT_COMPLETION_SETTINGS_READY;
+  const discriminatorAvailable = typeof hostReadyEvent === "string";
+  let hostGenerationAt = 0;
+  const markHostGeneration = () => {
+    hostGenerationAt = Date.now();
+  };
+  const clearHostGeneration = () => {
+    hostGenerationAt = 0;
+  };
+  const hostSubscriptions = [];
+  if (discriminatorAvailable)
+    for (const [event, fn] of [
+      [hostReadyEvent, markHostGeneration],
+      [eventTypes.GENERATION_STOPPED, clearHostGeneration],
+      [eventTypes.CHAT_CHANGED, clearHostGeneration],
+    ])
+      if (typeof event === "string") {
+        context().eventSource.on(event, fn);
+        hostSubscriptions.push([event, fn]);
+      }
   async function api(path, body, signal) {
     const deadline = requestDeadline(signal);
     try {
@@ -93,11 +135,9 @@ export function installAdapter(
     } catch {
       return previous(input, init);
     }
-    if (
-      !["custom", "openai", "claude", "makersuite"].includes(
-        body?.chat_completion_source,
-      )
-    )
+    const pending = hostGenerationAt;
+    hostGenerationAt = 0;
+    if (!shouldIntercept(body, pending, discriminatorAvailable))
       return previous(input, init);
     await lifecycle.flush?.();
     const settings = await api("/config").catch(
@@ -304,6 +344,8 @@ export function installAdapter(
     dispose() {
       disposed = true;
       this.cancel("plugin_disabled");
+      for (const [event, fn] of hostSubscriptions.splice(0))
+        context().eventSource.removeListener(event, fn);
       if (window.fetch === wrapper) window.fetch = previous;
     },
     get active() {

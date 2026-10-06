@@ -37,6 +37,39 @@ test("actual Claude gateway models accept a global temperature of 1.3 without mu
     1.3,
   );
 });
+test("relay-prefixed Claude model names are still treated as Claude", () => {
+  // 中继站会把厂商名拼在模型前面，分隔符是连字符而不是 / ] 】。
+  // 漏判会让全局温度 1.3 原样打到上游，换来 400 "temperature: range: 0..1"。
+  const input = { temperature: 1.3, messages: [{ role: "user", content: "hi" }] };
+  for (const model of [
+    "gemini-claude-opus-4-6-thinking",
+    "gemini-claude-sonnet-4-5",
+    "[自营]gemini-claude-opus-4-6-thinking",
+  ]) {
+    const node = {
+      model,
+      protocol: "openai",
+      url: "https://example.com/v1",
+      key: "test",
+    };
+    expect(adaptParameters(node, input).payload.temperature, model).toBe(1);
+    expect(prepare(node, input).body.temperature, model).toBe(1);
+  }
+  for (const model of ["gemini-3.8-flash", "gemini-3.1-pro-high", "gpt-4o"]) {
+    const node = {
+      model,
+      protocol: "openai",
+      url: "https://example.com/v1",
+      key: "test",
+    };
+    expect(adaptParameters(node, input).payload.temperature, model).toBe(1.3);
+  }
+  // "claude-" 前面是字母数字时不算，避免误伤 myclaude-x 这类名字。
+  expect(
+    adaptParameters({ model: "myclaude-x", protocol: "openai" }, input).payload
+      .temperature,
+  ).toBe(1.3);
+});
 test("obsolete per-node output caps are ignored; output limits follow SillyTavern", () => {
   const input = { max_tokens: 30000, max_completion_tokens: 50000 };
   const { payload } = adaptParameters({ maxTokens: 4096 }, input);

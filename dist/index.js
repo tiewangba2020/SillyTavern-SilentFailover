@@ -86,11 +86,42 @@ var delay = (ms, signal) => new Promise((resolve, reject) => {
   };
   signal?.addEventListener("abort", abort, { once: true });
 });
+var HOST_GENERATION_WINDOW_MS = 15e3;
+function shouldIntercept(body, pendingAt, discriminatorAvailable, now = Date.now()) {
+  if (!["custom", "openai", "claude", "makersuite"].includes(
+    body?.chat_completion_source
+  ))
+    return false;
+  if (!discriminatorAvailable) return true;
+  return pendingAt !== 0 && now - pendingAt < HOST_GENERATION_WINDOW_MS;
+}
 function installAdapter(context, onLocalRecord = () => {
 }, lifecycle = {}) {
   const previous = window.fetch;
   const active = /* @__PURE__ */ new Map();
   let disposed = false;
+  const eventTypes = context().eventTypes || {};
+  const hostReadyEvent = eventTypes.CHAT_COMPLETION_SETTINGS_READY;
+  const discriminatorAvailable = typeof hostReadyEvent === "string";
+  let hostGenerationAt = 0;
+  const markHostGeneration = () => {
+    hostGenerationAt = Date.now();
+  };
+  const clearHostGeneration = () => {
+    hostGenerationAt = 0;
+  };
+  const hostSubscriptions = [];
+  if (discriminatorAvailable) {
+    for (const [event, fn] of [
+      [hostReadyEvent, markHostGeneration],
+      [eventTypes.GENERATION_STOPPED, clearHostGeneration],
+      [eventTypes.CHAT_CHANGED, clearHostGeneration]
+    ])
+      if (typeof event === "string") {
+        context().eventSource.on(event, fn);
+        hostSubscriptions.push([event, fn]);
+      }
+  }
   async function api(path, body, signal) {
     const deadline = requestDeadline(signal);
     try {
@@ -142,9 +173,9 @@ function installAdapter(context, onLocalRecord = () => {
     } catch {
       return previous(input, init);
     }
-    if (!["custom", "openai", "claude", "makersuite"].includes(
-      body?.chat_completion_source
-    ))
+    const pending = hostGenerationAt;
+    hostGenerationAt = 0;
+    if (!shouldIntercept(body, pending, discriminatorAvailable))
       return previous(input, init);
     await lifecycle.flush?.();
     const settings = await api("/config").catch(
@@ -340,6 +371,8 @@ data: [DONE]
     dispose() {
       disposed = true;
       this.cancel("plugin_disabled");
+      for (const [event, fn] of hostSubscriptions.splice(0))
+        context().eventSource.removeListener(event, fn);
       if (window.fetch === wrapper) window.fetch = previous;
     },
     get active() {
@@ -349,7 +382,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.5.1";
+var VERSION = "1.5.2";
 
 // extension/panel.js
 var make = (tag, cls, text) => {

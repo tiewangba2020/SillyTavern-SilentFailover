@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.1.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.2.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -203,9 +203,9 @@ volumes:
 
 ```bash
 docker compose stop sillytavern
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.1/SillyTavern-SilentFailover-v1.5.1.zip -o SillyTavern-SilentFailover-v1.5.1.zip
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.1/SHA256SUMS-1.5.1 -o SHA256SUMS-1.5.1
-sha256sum --check --ignore-missing SHA256SUMS-1.5.1 && unzip SillyTavern-SilentFailover-v1.5.1.zip -d api-still-up-package
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.2/SillyTavern-SilentFailover-v1.5.2.zip -o SillyTavern-SilentFailover-v1.5.2.zip
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.2/SHA256SUMS-1.5.2 -o SHA256SUMS-1.5.2
+sha256sum --check --ignore-missing SHA256SUMS-1.5.2 && unzip SillyTavern-SilentFailover-v1.5.2.zip -d api-still-up-package
 docker compose run --rm --no-deps --entrypoint node -v "$PWD/api-still-up-package:/tmp/api-still-up-package:ro" sillytavern /tmp/api-still-up-package/install.mjs --target /home/node/app --config /home/node/app/config/config.yaml
 docker compose up -d sillytavern
 ```

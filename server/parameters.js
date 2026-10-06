@@ -26,9 +26,11 @@ export function adaptParameters(node, input) {
     });
     payload[parameter] = value;
   };
+  // 中继站常把厂商名拼在模型前面（例如 gemini-claude-opus-4-6-thinking），
+  // 所以分隔符不能只认 / ] 】 空格，任何非字母数字字符都算。
   const claude =
     node.protocol === "claude" ||
-    /(?:^|[\/\]】\s])claude-/i.test(node.model || "");
+    /(?:^|[^a-z0-9])claude-/i.test(node.model || "");
   if (
     claude &&
     Number.isFinite(payload.temperature) &&
