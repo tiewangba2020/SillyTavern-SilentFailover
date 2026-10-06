@@ -129,14 +129,24 @@ test("NEW is quiet and usage survives interrupted attempts and reaches the host 
     data: { mode: "usage-partial" },
   });
   const response = await page.evaluate(async () => {
+    const ctx = SillyTavern.getContext();
+    const body = {
+      chat_completion_source: "custom",
+      stream: true,
+      messages: [{ role: "user", content: "mock usage" }],
+    };
+    // 酒馆主生成在 fetch 前一行会广播 CHAT_COMPLETION_SETTINGS_READY。
+    // 1.5.2 起插件靠这个事件区分「酒馆自己的生成」和「其它扩展借道」，
+    // 只有前者才接管。这里要模拟的是主生成，所以必须照着广播一次，
+    // 否则请求会被原样放行到酒馆真实后端（表现为 Invalid URL）。
+    await ctx.eventSource.emit(
+      ctx.eventTypes.CHAT_COMPLETION_SETTINGS_READY,
+      body,
+    );
     const r = await fetch("/api/backends/chat-completions/generate", {
       method: "POST",
-      headers: SillyTavern.getContext().getRequestHeaders(),
-      body: JSON.stringify({
-        chat_completion_source: "custom",
-        stream: true,
-        messages: [{ role: "user", content: "mock usage" }],
-      }),
+      headers: ctx.getRequestHeaders(),
+      body: JSON.stringify(body),
     });
     return r.text();
   });

@@ -146,9 +146,14 @@ export async function init(router, options = {}) {
     "/jobs/:id",
     route((req, res) => {
       const job = req.failover.jobs.get(req.params.id, true);
-      job
-        ? res.json(job)
-        : res.status(404).json({ error: "任务不存在或已结束" });
+      if (job) return res.json(job);
+      // 任务已结束且被清出内存：仍然回话，前端才能给出准确原因，
+      // 而不是把 404 误报成「此酒馆没装插件服务端」。
+      const archived = req.failover.jobs.archived(req.params.id);
+      if (archived) return res.json(archived);
+      res
+        .status(404)
+        .json({ error: "任务不存在或已结束", code: "job_not_found" });
     }),
   );
   router.post(

@@ -13,7 +13,17 @@ export class Jobs {
     this.attempt =
       options.attempt || ((n, p, s, c, d) => attempt(n, p, s, c, null, d));
     this.waitMs = options.waitMs;
-    this.leaseMs = options.leaseMs || 60000;
+    // 前端每 600ms 轮询一次，租约只要「一分钟内有人问过」就不会失效。
+    // 但手机切后台、锁屏会让页面连定时器一起冻结，60 秒的租约会把还在跑的任务
+    // 直接取消（这类上游耗时普遍 60-110 秒），所以放宽到 3 分钟，
+    // 仍然能兜住页面被关掉、客户端彻底消失的情况。
+    this.leaseMs = options.leaseMs || 180000;
+    // 任务结束后结果还要在内存里留一段时间：页面冻结、酒馆重启都会让前端迟到很久
+    // 才来取结果。留 10 分钟；超过之后由 archived() 用落盘记录回话，
+    // 让前端能区分「任务不存在」和「任务结束了但结果已被清理」。
+    this.retentionMs = options.retentionMs || 10 * 60 * 1000;
+    // 正文只在内存里保留，条数上限防止长时间运行后堆积。
+    this.maxFinished = options.maxFinished || 50;
     this.jobs = new Map();
     this.records = store.loadLogs().map((j) =>
       terminal.has(j.state)
@@ -390,6 +400,15 @@ export class Jobs {
     if (touch) job.lease = Date.now();
     return this.snapshot(job, true);
   }
+  // 已经结束、并且被 expire() 清出内存的任务：用落盘记录回话。
+  // 记录里不含正文（snapshot 不带 result），所以前端只能知道任务结束了、结果拿不回来了，
+  // 这正是「任务不存在」和「任务成功但结果已被清理」的区别。
+  archived(id) {
+    const record = this.records.find((r) => r.id === id);
+    return record && terminal.has(record.state)
+      ? { ...structuredClone(record), evicted: true }
+      : null;
+  }
   list() {
     const byId = new Map(this.records.map((j) => [j.id, j]));
     for (const j of this.jobs.values()) byId.set(j.id, this.snapshot(j));
@@ -466,10 +485,20 @@ export class Jobs {
     }
   }
   expire() {
+    const now = Date.now();
+    const finished = [];
     for (const [id, j] of this.jobs) {
-      if (!terminal.has(j.state) && Date.now() - j.lease > this.leaseMs)
-        this.cancel(id, "lease_expired");
-      if (terminal.has(j.state) && Date.now() - (j.ended || j.started) > 60000)
+      if (!terminal.has(j.state)) {
+        if (now - j.lease > this.leaseMs) this.cancel(id, "lease_expired");
+        continue;
+      }
+      const at = j.ended || j.started;
+      if (now - at > this.retentionMs) this.jobs.delete(id);
+      else finished.push([at, id]);
+    }
+    if (finished.length > this.maxFinished) {
+      finished.sort((a, b) => a[0] - b[0]);
+      for (const [, id] of finished.slice(0, finished.length - this.maxFinished))
         this.jobs.delete(id);
     }
   }

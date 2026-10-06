@@ -262,17 +262,21 @@ test("native first repeats each round and can be cancelled by disabling linkage"
   await expect
     .poll(async () => (await api(page, "/records"))[0].state)
     .toBe("running");
-  await api(page, "/config", { ...c, nativeFirst: false });
+  // 每次写配置都要用最新的 revision：服务端会拒绝带过期 revision 的写入，
+  // 复用上面那份 c（中间已经改过一次 loop）会被判成「已在其他页面更改」。
+  const latest = await api(page, "/config");
+  await api(page, "/config", { ...latest, nativeFirst: false });
   expect(await page.evaluate(() => window.nativePending)).toBe("AbortError");
 });
 test("backup nodes can use Claude and Gemini native protocols", async ({
   page,
 }) => {
   await setup(page, "custom", "success");
-  const c = await api(page, "/config");
   for (const protocol of ["claude", "gemini"]) {
+    // 每轮都要重新读一次：上一轮写配置后 revision 已经变了。
+    const current = await api(page, "/config");
     await api(page, "/config", {
-      ...c,
+      ...current,
       nodes: [
         {
           id: "native-backup",

@@ -10,6 +10,82 @@ const exec = promisify(execFile);
 const bash =
   process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
 
+// PowerShell 的 Compress-Archive 会把条目写成反斜杠分隔，POSIX 的 unzip 会把
+// 反斜杠当成文件名字符，于是解出来的路径全错、install.sh 报 checksum/路径异常。
+// 这里直接写一份最小 ZIP（store，不压缩），条目名统一用正斜杠。
+const crcTable = (() => {
+  const table = new Int32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[i] = c;
+  }
+  return table;
+})();
+const crc32 = (buffer) => {
+  let c = -1;
+  for (const byte of buffer) c = crcTable[(c ^ byte) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+};
+function zipDirectory(root) {
+  const files = [];
+  const walk = (dir, prefix) => {
+    const names = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .map((e) => e.name)
+      .sort();
+    for (const name of names) {
+      const full = path.join(dir, name);
+      const entry = prefix ? `${prefix}/${name}` : name;
+      if (fs.statSync(full).isDirectory()) walk(full, entry);
+      else files.push([entry, fs.readFileSync(full)]);
+    }
+  };
+  walk(root, "");
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const [name, data] of files) {
+    const nameBuf = Buffer.from(name, "utf8");
+    const crc = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(0x0800, 6); // 条目名按 UTF-8 解释
+    local.writeUInt16LE(0, 8); // store
+    local.writeUInt16LE(0, 10);
+    local.writeUInt16LE(0x21, 12); // 1980-01-01
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(nameBuf.length, 26);
+    parts.push(local, nameBuf, data);
+    const dir = Buffer.alloc(46);
+    dir.writeUInt32LE(0x02014b50, 0);
+    dir.writeUInt16LE(20, 4);
+    dir.writeUInt16LE(20, 6);
+    dir.writeUInt16LE(0x0800, 8);
+    dir.writeUInt16LE(0, 10);
+    dir.writeUInt16LE(0, 12);
+    dir.writeUInt16LE(0x21, 14);
+    dir.writeUInt32LE(crc, 16);
+    dir.writeUInt32LE(data.length, 20);
+    dir.writeUInt32LE(data.length, 24);
+    dir.writeUInt16LE(nameBuf.length, 28);
+    dir.writeUInt32LE(offset, 42);
+    central.push(dir, nameBuf);
+    offset += local.length + nameBuf.length + data.length;
+  }
+  const directory = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, directory, end]);
+}
+
 test.skipIf(process.platform === "win32" && !fs.existsSync(bash))(
   "portable bootstrap installs a checked release and rejects a corrupt checksum before changing files",
   async () => {
@@ -17,14 +93,9 @@ test.skipIf(process.platform === "win32" && !fs.existsSync(bash))(
     let server;
     try {
       const zip = path.join(dir, "release.zip");
-      if (process.platform === "win32") {
-        const quote = (s) => "'" + s.replace(/'/g, "''") + "'";
-        await exec("powershell.exe", [
-          "-NoProfile",
-          "-Command",
-          `Compress-Archive -Path ${quote(path.resolve("release/*"))} -DestinationPath ${quote(zip)}`,
-        ]);
-      } else await exec("zip", ["-qr", zip, "."], { cwd: "release" });
+      if (process.platform === "win32")
+        fs.writeFileSync(zip, zipDirectory(path.resolve("release")));
+      else await exec("zip", ["-qr", zip, "."], { cwd: "release" });
       const data = fs.readFileSync(zip),
         hash = createHash("sha256").update(data).digest("hex");
       let corrupt = false;

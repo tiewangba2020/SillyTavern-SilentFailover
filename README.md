@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.2.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.3.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -203,9 +203,9 @@ volumes:
 
 ```bash
 docker compose stop sillytavern
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.2/SillyTavern-SilentFailover-v1.5.2.zip -o SillyTavern-SilentFailover-v1.5.2.zip
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.2/SHA256SUMS-1.5.2 -o SHA256SUMS-1.5.2
-sha256sum --check --ignore-missing SHA256SUMS-1.5.2 && unzip SillyTavern-SilentFailover-v1.5.2.zip -d api-still-up-package
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.3/SillyTavern-SilentFailover-v1.5.3.zip -o SillyTavern-SilentFailover-v1.5.3.zip
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.3/SHA256SUMS-1.5.3 -o SHA256SUMS-1.5.3
+sha256sum --check --ignore-missing SHA256SUMS-1.5.3 && unzip SillyTavern-SilentFailover-v1.5.3.zip -d api-still-up-package
 docker compose run --rm --no-deps --entrypoint node -v "$PWD/api-still-up-package:/tmp/api-still-up-package:ro" sillytavern /tmp/api-still-up-package/install.mjs --target /home/node/app --config /home/node/app/config/config.yaml
 docker compose up -d sillytavern
 ```
@@ -395,6 +395,21 @@ Google 是按型号逐个收紧的，不是按大版本一刀切，所以插件�
 先确认电脑与手机打开的是同一台电脑、同一端口的酒馆，并查看插件面板的完整报错。`404` 通常表示该实例没有加载插件服务端；`401` 表示登录失效；`403` 可能涉及权限或 CSRF 校验，先刷新重新登录，并检查电脑后台日志。酒馆页面能打开，不等于插件服务端已正确安装加载。
 
 普通 `http://局域网IP:端口` 与电脑上的 `localhost` 属于不同的浏览器安全环境。若出现 `crypto.randomUUID is not a function` 或 `AbortSignal.any/timeout is not a function`，属于浏览器接口兼容问题，不是 Key 失效。反馈时附上插件前后端版本、手机浏览器名称及完整错误文字，不要公开 Key。
+
+### 生成等很久之后报错，回复也丢了？
+
+酒馆把生成交给插件后，浏览器每 600ms 问一次服务端要结果。这期间如果页面被冻结——手机锁屏、切到别的 App、系统回收后台标签——轮询会跟着停摆；等页面恢复时任务往往已经结束，正文也已经不在内存里，前端只能报错，回复白丢。上游越慢（这类中转经常要 60–110 秒才回）越容易撞上。
+
+1.5.3 起：
+
+- 任务结束后结果会在服务端内存里继续保留 **10 分钟**（只保留最近 50 条，正文不写盘）。
+- 租约从 60 秒放宽到 **3 分钟**，避免页面短暂冻结就把还在跑的任务取消掉。
+- 轮询遇到 404 会先多问几次（酒馆刚重启时记录也可能还没读出来），确认拿不到才当作致命错误。
+- 页面从后台回到前台时，失联计时会重新开始，解冻后第一条请求偶发失败不会再直接判定为掉线。
+- 万一真的超时、或者中途重启过酒馆，插件会明确提示「这次生成其实已经成功，但结果已被服务端清理」，不再把它和「此酒馆未找到插件服务端」混为一谈。
+- 交付失败时面板顶部会直接写出原因和失败阶段，不必展开「请求记录」。
+
+想彻底避免丢结果，生成期间不要锁屏或切走；慢上游建议把「等待策略」保持默认的 `patient`，并尽量别在生成中刷新页面。
 
 ### 酒馆原来的 API 设置去哪了？
 

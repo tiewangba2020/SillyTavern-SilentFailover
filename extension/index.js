@@ -18,6 +18,11 @@ const ADJUSTMENTS = {
   max_tokens: "输出上限",
   trailing_model_turn: "末尾模型轮次",
 };
+const PHASE_LABELS = {
+  create_job: "提交任务",
+  poll_job: "等待结果",
+  prepare_response: "组装响应",
+};
 let bridge, root, config, refreshTimer, snapshot;
 let hostConnection;
 const READY_STATUS = "API还没挂就绪";
@@ -860,6 +865,10 @@ async function refreshRecords() {
   try {
     records = await bridge.api("/records");
   } catch {}
+  renderRecords(records);
+}
+function renderRecords(records) {
+  if (!root?.isConnected) return;
   const area = root.querySelector("[data-records]");
   const open = new Set(
     [...area.querySelectorAll("details[open]")].map((x) => x.dataset.id),
@@ -1345,19 +1354,19 @@ async function boot() {
   refreshTimer = setInterval(() => {
     renderNative();
     updateReadiness();
-    if (!document.hidden) {
-      if (root.querySelector("[data-history]").open) void refreshRecords();
-      if (config)
-        void bridge
-          .api("/records")
-          .then((records) =>
-            panel.update(
-              { ...savedConfig, floatingWindow: config.floatingWindow },
-              records,
-            ),
-          )
-          .catch(() => {});
-    }
+    if (document.hidden || !config) return;
+    // 每秒只取一次记录：以前这里会同时打两个 /records，手机上容易把连接占满，
+    // 反而拖慢真正的任务轮询。
+    void bridge
+      .api("/records")
+      .then((records) => {
+        panel.update(
+          { ...savedConfig, floatingWindow: config.floatingWindow },
+          records,
+        );
+        if (root.querySelector("[data-history]").open) renderRecords(records);
+      })
+      .catch(() => {});
   }, 1000);
   await guarded(async () => {
     const hostPath = "/script.js";
@@ -1410,6 +1419,13 @@ bridge = installAdapter(
   (r) => {
     localRecords.unshift(r);
     localRecords.splice(100);
+    // 交付失败必须让用户看见：以前只写进「请求记录」，面板不展开就完全没提示。
+    if (root)
+      message(
+        `本次生成未交付：${r.reason}（${
+          PHASE_LABELS[r.phase] || r.phase || "未知阶段"
+        }${r.status ? ` · HTTP ${r.status}` : ""}）`,
+      );
   },
   {
     start() {

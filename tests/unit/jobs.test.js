@@ -239,6 +239,60 @@ describe("sequential jobs", () => {
     jobs.expire();
     expect((await finish(jobs, j.id)).state).toBe("cancelled");
   });
+  test("defaults keep a finished result long enough for a frozen page", () => {
+    // 前端轮询被冻结、手机锁屏、酒馆重启都会让取结果迟到很久，
+    // 这两个窗口必须明显长于上游耗时（实测 60-110 秒），否则正文会白丢。
+    const dir = mkdtempSync(path.join(tmpdir(), "st-failover-"));
+    const store = new Store(dir);
+    const jobs = new Jobs(store, { attempt: async () => ok });
+    resources.push({ dir, jobs });
+    expect(jobs.leaseMs).toBe(180000);
+    expect(jobs.retentionMs).toBe(600000);
+  });
+  test("a finished job is still retrievable, then falls back to the archived record", async () => {
+    const { jobs } = fixture(async () => ok);
+    const j = await finish(jobs, jobs.create("late-poll", request).id);
+    expect(jobs.get(j.id, true).result).toEqual(ok);
+    // 页面被冻结两分钟：以前 60 秒就把任务清出内存，前端只能拿到 404；
+    // 现在结果照常交付。
+    jobs.jobs.get(j.id).ended = Date.now() - 120000;
+    jobs.expire();
+    expect(jobs.get(j.id).result).toEqual(ok);
+    // 超过保留期：清出内存，但落盘记录还能让前端说清「成功了，只是结果没了」。
+    jobs.jobs.get(j.id).ended = Date.now() - 20 * 60 * 1000;
+    jobs.expire();
+    expect(jobs.get(j.id)).toBeNull();
+    const archived = jobs.archived(j.id);
+    expect(archived.state).toBe("succeeded");
+    expect(archived.evicted).toBe(true);
+    expect(archived.result).toBeUndefined();
+    expect(jobs.archived("never-created")).toBeNull();
+  });
+  test("in-memory finished results are capped, oldest first", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "st-failover-"));
+    const store = new Store(dir);
+    const jobs = new Jobs(store, {
+      attempt: async () => ok,
+      maxFinished: 2,
+      waitMs: 0,
+    });
+    resources.push({ dir, jobs });
+    store.save({
+      enabled: true,
+      loop: false,
+      nodes: [
+        { name: "A", url: "https://example.com/v1", model: "A", priority: 1 },
+      ],
+    });
+    for (const id of ["a", "b", "c"]) await finish(jobs, jobs.create(id, request).id);
+    const now = Date.now();
+    jobs.jobs.get("a").ended = now - 3000;
+    jobs.jobs.get("b").ended = now - 2000;
+    jobs.jobs.get("c").ended = now - 1000;
+    jobs.expire();
+    expect(["a", "b", "c"].filter((id) => jobs.get(id))).toEqual(["b", "c"]);
+    expect(jobs.archived("a").state).toBe("succeeded");
+  });
   test("configuration changes apply to next round", async () => {
     let calls = 0;
     let store;

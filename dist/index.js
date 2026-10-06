@@ -95,6 +95,25 @@ function shouldIntercept(body, pendingAt, discriminatorAvailable, now = Date.now
   if (!discriminatorAvailable) return true;
   return pendingAt !== 0 && now - pendingAt < HOST_GENERATION_WINDOW_MS;
 }
+var API_STATUS_MESSAGES = {
+  401: "\u9152\u9986\u767B\u5F55\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u540E\u5237\u65B0\u9875\u9762",
+  403: "\u9152\u9986\u62D2\u7EDD\u4E86\u63D2\u4EF6\u8BF7\u6C42\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u767B\u5F55\uFF0C\u5E76\u68C0\u67E5\u8BBF\u95EE\u6743\u9650\u6216 CSRF \u9519\u8BEF",
+  404: "\u6B64\u9152\u9986\u672A\u627E\u5230\u63D2\u4EF6\u670D\u52A1\u7AEF\uFF0C\u8BF7\u786E\u8BA4\u4E24\u90E8\u5206\u5B89\u88C5\u5728\u624B\u673A\u8BBF\u95EE\u7684\u540C\u4E00\u4E2A\u9152\u9986\u4E2D\uFF0C\u5E76\u91CD\u542F\u9152\u9986\u540E\u53F0"
+};
+function apiErrorMessage(status, data) {
+  const fromServer = typeof data?.error === "string" ? data.error.trim() : "";
+  return status === 404 && fromServer || API_STATUS_MESSAGES[status] || fromServer || "\u670D\u52A1\u7AEF\u8BF7\u6C42\u5931\u8D25";
+}
+var POLL_NOT_FOUND_ATTEMPTS = 3;
+var CONTACT_TIMEOUT_MS = 55e3;
+function shouldRetryPoll(error, { aborted, lastContact, now, notFound }) {
+  if (aborted) return false;
+  if (error?.status === 404) return notFound < POLL_NOT_FOUND_ATTEMPTS;
+  return now - lastContact <= CONTACT_TIMEOUT_MS;
+}
+function contactBase(lastContact, resumedAt) {
+  return resumedAt > lastContact ? resumedAt : lastContact;
+}
 function installAdapter(context, onLocalRecord = () => {
 }, lifecycle = {}) {
   const previous = window.fetch;
@@ -110,6 +129,12 @@ function installAdapter(context, onLocalRecord = () => {
   const clearHostGeneration = () => {
     hostGenerationAt = 0;
   };
+  let resumedAt = 0;
+  const markVisible = () => {
+    if (document.visibilityState === "visible") resumedAt = Date.now();
+  };
+  if (typeof document !== "undefined")
+    document.addEventListener("visibilitychange", markVisible);
   const hostSubscriptions = [];
   if (discriminatorAvailable) {
     for (const [event, fn] of [
@@ -131,11 +156,7 @@ function installAdapter(context, onLocalRecord = () => {
         ...body === void 0 ? {} : { body: JSON.stringify(body) },
         signal: deadline.signal
       });
-      const statusMessage = {
-        401: "\u9152\u9986\u767B\u5F55\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u540E\u5237\u65B0\u9875\u9762",
-        403: "\u9152\u9986\u62D2\u7EDD\u4E86\u63D2\u4EF6\u8BF7\u6C42\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u91CD\u65B0\u767B\u5F55\uFF0C\u5E76\u68C0\u67E5\u8BBF\u95EE\u6743\u9650\u6216 CSRF \u9519\u8BEF",
-        404: "\u6B64\u9152\u9986\u672A\u627E\u5230\u63D2\u4EF6\u670D\u52A1\u7AEF\uFF0C\u8BF7\u786E\u8BA4\u4E24\u90E8\u5206\u5B89\u88C5\u5728\u624B\u673A\u8BBF\u95EE\u7684\u540C\u4E00\u4E2A\u9152\u9986\u4E2D\uFF0C\u5E76\u91CD\u542F\u9152\u9986\u540E\u53F0"
-      }[response.status];
+      const statusMessage = API_STATUS_MESSAGES[response.status];
       let data;
       try {
         data = await response.json();
@@ -149,12 +170,10 @@ function installAdapter(context, onLocalRecord = () => {
         );
       }
       if (!response.ok)
-        throw Object.assign(
-          new Error(statusMessage || data?.error || "\u670D\u52A1\u7AEF\u8BF7\u6C42\u5931\u8D25"),
-          {
-            status: response.status
-          }
-        );
+        throw Object.assign(new Error(apiErrorMessage(response.status, data)), {
+          status: response.status,
+          code: typeof data?.code === "string" ? data.code : null
+        });
       return data;
     } finally {
       deadline.dispose();
@@ -211,24 +230,39 @@ function installAdapter(context, onLocalRecord = () => {
           );
           lastContact = Date.now();
         } catch (e) {
-          if (controller.signal.aborted || e.status && e.status < 500 || Date.now() - lastContact > 55e3)
+          if (controller.signal.aborted || e.status && e.status < 500 || Date.now() - contactBase(lastContact, resumedAt) > CONTACT_TIMEOUT_MS)
             throw e;
           await delay(1e3, controller.signal);
         }
       }
       phase = "poll_job";
+      let notFound = 0;
       while (["running", "waiting"].includes(job.state)) {
         await delay(600, controller.signal);
         try {
           job = await api("/jobs/" + id, void 0, controller.signal);
           lastContact = Date.now();
+          notFound = 0;
         } catch (e) {
-          if (controller.signal.aborted || e.status === 404 || Date.now() - lastContact > 55e3)
+          if (e?.status === 404) notFound++;
+          if (!shouldRetryPoll(e, {
+            aborted: controller.signal.aborted,
+            lastContact: contactBase(lastContact, resumedAt),
+            now: Date.now(),
+            notFound
+          }))
             throw e;
         }
       }
       if (controller.signal.aborted || job.state !== "succeeded")
         throw cancelled();
+      if (!job.result)
+        throw Object.assign(
+          new Error(
+            job.evicted ? "\u8FD9\u6B21\u751F\u6210\u5176\u5B9E\u5DF2\u7ECF\u6210\u529F\uFF0C\u4F46\u7ED3\u679C\u5DF2\u88AB\u670D\u52A1\u7AEF\u6E05\u7406\uFF08\u9875\u9762\u957F\u65F6\u95F4\u672A\u54CD\u5E94\uFF09\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210" : "\u670D\u52A1\u7AEF\u8FD4\u56DE\u7684\u4EFB\u52A1\u7F3A\u5C11\u7ED3\u679C\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210"
+          ),
+          { code: job.evicted ? "result_evicted" : "result_missing" }
+        );
       void api("/jobs/" + id + "/ack", {}).catch(() => {
       });
       phase = "prepare_response";
@@ -348,7 +382,12 @@ data: [DONE]
             "TimeoutError",
             "AbortError"
           ].includes(e.name) ? e.name : "Error",
-          reason: "\u670D\u52A1\u7AEF\u8FDE\u63A5\u4E0D\u53EF\u7528\u6216\u8BF7\u6C42\u65E0\u6548",
+          code: e?.code || null,
+          // 记下真实原因，否则导出诊断日志后只能看到一句通用文案。
+          reason: String(e?.message || "\u670D\u52A1\u7AEF\u8FDE\u63A5\u4E0D\u53EF\u7528\u6216\u8BF7\u6C42\u65E0\u6548").slice(
+            0,
+            300
+          ),
           attempts: []
         });
       void api("/jobs/" + id + "/cancel", {
@@ -371,6 +410,8 @@ data: [DONE]
     dispose() {
       disposed = true;
       this.cancel("plugin_disabled");
+      if (typeof document !== "undefined")
+        document.removeEventListener("visibilitychange", markVisible);
       for (const [event, fn] of hostSubscriptions.splice(0))
         context().eventSource.removeListener(event, fn);
       if (window.fetch === wrapper) window.fetch = previous;
@@ -382,7 +423,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.5.2";
+var VERSION = "1.5.3";
 
 // extension/panel.js
 var make = (tag, cls, text) => {
@@ -783,6 +824,11 @@ var ADJUSTMENTS = {
   temperature: "\u6E29\u5EA6",
   max_tokens: "\u8F93\u51FA\u4E0A\u9650",
   trailing_model_turn: "\u672B\u5C3E\u6A21\u578B\u8F6E\u6B21"
+};
+var PHASE_LABELS = {
+  create_job: "\u63D0\u4EA4\u4EFB\u52A1",
+  poll_job: "\u7B49\u5F85\u7ED3\u679C",
+  prepare_response: "\u7EC4\u88C5\u54CD\u5E94"
 };
 var bridge;
 var root;
@@ -1572,6 +1618,10 @@ async function refreshRecords() {
     records = await bridge.api("/records");
   } catch {
   }
+  renderRecords(records);
+}
+function renderRecords(records) {
+  if (!root?.isConnected) return;
   const area = root.querySelector("[data-records]");
   const open = new Set(
     [...area.querySelectorAll("details[open]")].map((x) => x.dataset.id)
@@ -2018,17 +2068,15 @@ async function boot() {
   refreshTimer = setInterval(() => {
     renderNative();
     updateReadiness();
-    if (!document.hidden) {
-      if (root.querySelector("[data-history]").open) void refreshRecords();
-      if (config)
-        void bridge.api("/records").then(
-          (records) => panel.update(
-            { ...savedConfig, floatingWindow: config.floatingWindow },
-            records
-          )
-        ).catch(() => {
-        });
-    }
+    if (document.hidden || !config) return;
+    void bridge.api("/records").then((records) => {
+      panel.update(
+        { ...savedConfig, floatingWindow: config.floatingWindow },
+        records
+      );
+      if (root.querySelector("[data-history]").open) renderRecords(records);
+    }).catch(() => {
+    });
   }, 1e3);
   await guarded(async () => {
     const hostPath = "/script.js";
@@ -2080,6 +2128,10 @@ bridge = installAdapter(
   (r) => {
     localRecords.unshift(r);
     localRecords.splice(100);
+    if (root)
+      message(
+        `\u672C\u6B21\u751F\u6210\u672A\u4EA4\u4ED8\uFF1A${r.reason}\uFF08${PHASE_LABELS[r.phase] || r.phase || "\u672A\u77E5\u9636\u6BB5"}${r.status ? ` \xB7 HTTP ${r.status}` : ""}\uFF09`
+      );
   },
   {
     start() {

@@ -122,3 +122,25 @@ test("rejects duplicate node IDs, credential URLs and recursive endpoints before
   ).toThrow("上游");
   expect(store.config.nodes).toEqual([]);
 });
+test("a job that outlives the in-memory table still answers with its archived record", async () => {
+  // 这条覆盖线上事故：页面被冻结、酒馆重启之后前端才来取结果。
+  // 以前这里只回 404，前端把它误报成「此酒馆未找到插件服务端」。
+  const created = await (
+    await call("one", "/jobs", {
+      id: "late-poll-after-restart",
+      request: { messages: [] },
+    })
+  ).json();
+  expect(created.state).toBe("invalid");
+  await exit();
+  const late = await call("one", "/jobs/late-poll-after-restart");
+  expect(late.status).toBe(200);
+  const archived = await late.json();
+  expect(archived.id).toBe("late-poll-after-restart");
+  expect(archived.state).toBe("invalid");
+  expect(archived.evicted).toBe(true);
+  expect(archived).not.toHaveProperty("result");
+  const missing = await call("one", "/jobs/never-created");
+  expect(missing.status).toBe(404);
+  expect((await missing.json()).code).toBe("job_not_found");
+});

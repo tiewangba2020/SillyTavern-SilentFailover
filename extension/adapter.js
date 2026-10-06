@@ -45,6 +45,39 @@ export function shouldIntercept(
   if (!discriminatorAvailable) return true;
   return pendingAt !== 0 && now - pendingAt < HOST_GENERATION_WINDOW_MS;
 }
+export const API_STATUS_MESSAGES = {
+  401: "酒馆登录已失效，请重新登录后刷新页面",
+  403: "酒馆拒绝了插件请求，请刷新页面重新登录，并检查访问权限或 CSRF 错误",
+  404: "此酒馆未找到插件服务端，请确认两部分安装在手机访问的同一个酒馆中，并重启酒馆后台",
+};
+// 只有本插件服务端在跑，404 才会带 JSON 的 error 字段（例如「任务不存在或已结束」）。
+// 酒馆自身或反向代理返回的 404 通常是 HTML，解析失败后走 statusMessage 兜底。
+// 所以「有没有服务端消息」正好能区分「服务端在、任务不在」和「服务端没装」。
+export function apiErrorMessage(status, data) {
+  const fromServer = typeof data?.error === "string" ? data.error.trim() : "";
+  return (
+    (status === 404 && fromServer) ||
+    API_STATUS_MESSAGES[status] ||
+    fromServer ||
+    "服务端请求失败"
+  );
+}
+// 页面被冻结、酒馆重启之后，前端可能刚好错过任务还在内存里的那段窗口。
+// 404 先多问几次（酒馆刚重启时记录也可能还没读出来），确认拿不到才当作致命错误。
+export const POLL_NOT_FOUND_ATTEMPTS = 3;
+export const CONTACT_TIMEOUT_MS = 55000;
+export function shouldRetryPoll(error, { aborted, lastContact, now, notFound }) {
+  if (aborted) return false;
+  if (error?.status === 404) return notFound < POLL_NOT_FOUND_ATTEMPTS;
+  return now - lastContact <= CONTACT_TIMEOUT_MS;
+}
+// 手机锁屏或切到后台时，浏览器会把定时器一起冻结；回到前台后第一条请求
+// 经常正好撞上网络重连而失败。此时 lastContact 已经是几分钟前，55 秒的失联
+// 判定会立刻放弃，但「页面刚才在睡觉」并不能证明服务端不见了。
+// 所以回到前台的时刻也算一次新的接触，给这条请求一次重试机会。
+export function contactBase(lastContact, resumedAt) {
+  return resumedAt > lastContact ? resumedAt : lastContact;
+}
 export function installAdapter(
   context,
   onLocalRecord = () => {},
@@ -63,6 +96,13 @@ export function installAdapter(
   const clearHostGeneration = () => {
     hostGenerationAt = 0;
   };
+  // 页面从后台回到前台的那一刻，当作一次新的接触（见 contactBase 的说明）。
+  let resumedAt = 0;
+  const markVisible = () => {
+    if (document.visibilityState === "visible") resumedAt = Date.now();
+  };
+  if (typeof document !== "undefined")
+    document.addEventListener("visibilitychange", markVisible);
   const hostSubscriptions = [];
   if (discriminatorAvailable)
     for (const [event, fn] of [
@@ -83,11 +123,7 @@ export function installAdapter(
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: deadline.signal,
       });
-      const statusMessage = {
-        401: "酒馆登录已失效，请重新登录后刷新页面",
-        403: "酒馆拒绝了插件请求，请刷新页面重新登录，并检查访问权限或 CSRF 错误",
-        404: "此酒馆未找到插件服务端，请确认两部分安装在手机访问的同一个酒馆中，并重启酒馆后台",
-      }[response.status];
+      const statusMessage = API_STATUS_MESSAGES[response.status];
       let data;
       try {
         data = await response.json();
@@ -102,12 +138,10 @@ export function installAdapter(
         );
       }
       if (!response.ok)
-        throw Object.assign(
-          new Error(statusMessage || data?.error || "服务端请求失败"),
-          {
-            status: response.status,
-          },
-        );
+        throw Object.assign(new Error(apiErrorMessage(response.status, data)), {
+          status: response.status,
+          code: typeof data?.code === "string" ? data.code : null,
+        });
       return data;
     } finally {
       deadline.dispose();
@@ -177,29 +211,46 @@ export function installAdapter(
           if (
             controller.signal.aborted ||
             (e.status && e.status < 500) ||
-            Date.now() - lastContact > 55000
+            Date.now() - contactBase(lastContact, resumedAt) > CONTACT_TIMEOUT_MS
           )
             throw e;
           await delay(1000, controller.signal);
         }
       }
       phase = "poll_job";
+      let notFound = 0;
       while (["running", "waiting"].includes(job.state)) {
         await delay(600, controller.signal);
         try {
           job = await api("/jobs/" + id, undefined, controller.signal);
           lastContact = Date.now();
+          notFound = 0;
         } catch (e) {
+          if (e?.status === 404) notFound++;
           if (
-            controller.signal.aborted ||
-            e.status === 404 ||
-            Date.now() - lastContact > 55000
+            !shouldRetryPoll(e, {
+              aborted: controller.signal.aborted,
+              lastContact: contactBase(lastContact, resumedAt),
+              now: Date.now(),
+              notFound,
+            })
           )
             throw e;
         }
       }
       if (controller.signal.aborted || job.state !== "succeeded")
         throw cancelled();
+      // 任务在服务端结束了，但正文已经不在了（evicted 表示结果只在落盘记录里）。
+      // 这种情况必须报清楚，不能当成普通失败，更不能当成成功。
+      if (!job.result)
+        throw Object.assign(
+          new Error(
+            job.evicted
+              ? "这次生成其实已经成功，但结果已被服务端清理（页面长时间未响应），请重新生成"
+              : "服务端返回的任务缺少结果，请重新生成",
+          ),
+          { code: job.evicted ? "result_evicted" : "result_missing" },
+        );
       void api("/jobs/" + id + "/ack", {}).catch(() => {});
       phase = "prepare_response";
       const handoff = (response) => {
@@ -320,7 +371,12 @@ export function installAdapter(
           ].includes(e.name)
             ? e.name
             : "Error",
-          reason: "服务端连接不可用或请求无效",
+          code: e?.code || null,
+          // 记下真实原因，否则导出诊断日志后只能看到一句通用文案。
+          reason: String(e?.message || "服务端连接不可用或请求无效").slice(
+            0,
+            300,
+          ),
           attempts: [],
         });
       void api("/jobs/" + id + "/cancel", {
@@ -344,6 +400,8 @@ export function installAdapter(
     dispose() {
       disposed = true;
       this.cancel("plugin_disabled");
+      if (typeof document !== "undefined")
+        document.removeEventListener("visibilitychange", markVisible);
       for (const [event, fn] of hostSubscriptions.splice(0))
         context().eventSource.removeListener(event, fn);
       if (window.fetch === wrapper) window.fetch = previous;
