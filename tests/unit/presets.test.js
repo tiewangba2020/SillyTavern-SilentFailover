@@ -103,6 +103,18 @@ test("corrupted or orphaned config no longer bricks the plugin", () => {
   expect(salvaged.config.enabled).toBe(true);
   expect(salvaged.config.nodes).toEqual([node]);
   expect(salvaged.keys()).toContain(node.key);
+
+  // 没有临时文件、只有截断的主文件：把里面完整的节点对象抠出来恢复。
+  for (const name of fs.readdirSync(path.dirname(file)))
+    if (name.endsWith(".tmp")) fs.unlinkSync(path.join(path.dirname(file), name));
+  fs.writeFileSync(
+    file,
+    `{"schema":3,"presets":[{"id":"p","name":"默认预设","config":{"nodes":[${JSON.stringify(node)},{"id":"second","name":"B","url":"https://b.example.com/v1","model":"m","key":"second-key"}]}}],"acti`,
+  );
+  const partial = new Store(dir);
+  expect(partial.warning).toContain("恢复");
+  expect(partial.config.nodes.map((n) => n.name)).toEqual(["test", "B"]);
+  expect(partial.keys()).toContain("second-key");
 });
 test("rejects stale saves and duplicate names without overwriting saved data", () => {
   const { store, dir } = fixture();

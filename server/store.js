@@ -37,12 +37,101 @@ export function atomicJson(file, value) {
 // 读不动文件（权限、磁盘满）是真问题，交给上层报错；
 // 内容坏了（手机被强杀、存储写一半、手工改过）只影响这一份数据，
 // 备份原文件后按默认配置继续跑，否则用户会一直卡在「无法读取插件数据」。
-const parseConfig = (file) => {
-  const value = JSON.parse(fs.readFileSync(file, "utf8"));
+const parseConfigText = (text) => {
+  const value = JSON.parse(text);
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("内容不是对象");
   return value;
 };
+const parseConfig = (file) => parseConfigText(fs.readFileSync(file, "utf8"));
+// 整份 JSON 解析失败时，里面往往还留着完整的节点对象（截断多半发生在文件末尾）。
+// 按括号配对把 "nodes":[...] 里的对象一个个抠出来单独解析，比整份放弃好得多——
+// 用户的 API Key 全在节点里。
+function scanNodes(text) {
+  const nodes = [];
+  const seen = new Set();
+  let from = 0;
+  while (nodes.length < 100) {
+    const at = text.indexOf('"nodes"', from);
+    if (at < 0) break;
+    const open = text.indexOf("[", at + 7);
+    if (open < 0) break;
+    from = open + 1;
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+    for (let i = open + 1; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "{") {
+        if (depth === 0) start = i;
+        depth++;
+        continue;
+      }
+      if (ch === "}") {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          let node = null;
+          try {
+            node = JSON.parse(text.slice(start, i + 1));
+          } catch {}
+          const id = node && (node.id || node.url);
+          if (
+            node &&
+            typeof node.url === "string" &&
+            typeof node.name === "string" &&
+            id &&
+            !seen.has(id)
+          ) {
+            seen.add(id);
+            nodes.push(node);
+          }
+          start = -1;
+        }
+        if (depth < 0) break;
+        continue;
+      }
+      if (ch === "]" && depth === 0) break;
+    }
+  }
+  return nodes;
+}
+// 主文件写坏时，先看它自己的残留内容，再看历史上备份下来的 .broken-* 文件。
+function salvageNodes(file, text) {
+  const own = text ? scanNodes(text) : [];
+  if (own.length) return { nodes: own, source: "当前文件" };
+  let newest = null;
+  let newestAt = 0;
+  try {
+    for (const name of fs.readdirSync(path.dirname(file))) {
+      if (!name.startsWith(path.basename(file) + ".broken-")) continue;
+      const full = path.join(path.dirname(file), name);
+      const at = fs.statSync(full).mtimeMs;
+      if (at > newestAt) {
+        newestAt = at;
+        newest = full;
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (!newest) return null;
+  try {
+    const nodes = scanNodes(fs.readFileSync(newest, "utf8"));
+    if (nodes.length) return { nodes, source: path.basename(newest) };
+  } catch {}
+  return null;
+}
 // atomicJson 先写 <config>.json.<uuid>.tmp 再改名；进程被强杀时临时文件是完整的，
 // 比坏掉的主文件可靠，优先用它把用户的节点和 Key 捞回来。
 function salvageTemporary(file) {
@@ -79,9 +168,11 @@ function readConfig(file) {
         }
       : { stored: {}, warning: "" };
   }
+  // 读不动（权限、只读挂载）是真问题，往上抛；读到了但解析不了才算文件损坏。
+  const text = fs.readFileSync(file, "utf8");
   let problem = "";
   try {
-    return { stored: parseConfig(file), warning: "" };
+    return { stored: parseConfigText(text), warning: "" };
   } catch (e) {
     problem = e.message;
   }
@@ -97,6 +188,12 @@ function readConfig(file) {
     return {
       stored: salvaged.stored,
       warning: `配置文件无法解析（${problem}），已${moved ? `备份为 ${path.basename(backup)}` : "跳过备份"}，并从临时文件（${salvaged.name}）恢复了设置`,
+    };
+  const recovered = salvageNodes(file, text);
+  if (recovered)
+    return {
+      stored: { ...structuredClone(DEFAULTS), nodes: recovered.nodes },
+      warning: `配置文件无法解析（${problem}），已${moved ? `备份为 ${path.basename(backup)}` : "跳过备份"}，并从${recovered.source}恢复了 ${recovered.nodes.length} 个节点`,
     };
   return {
     stored: {},

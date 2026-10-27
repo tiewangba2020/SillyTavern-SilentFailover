@@ -91,6 +91,43 @@ test("salvages a broken config from the temporary file and reports node count", 
   expect(saved.nodes).toHaveLength(2);
 });
 
+test("recovers complete nodes out of a truncated config and can restore them later", () => {
+  const dir = tavern();
+  const folder = path.join(dir, "data/default-user/silent-failover");
+  const node = (name) =>
+    JSON.stringify({
+      id: "id-" + name,
+      name,
+      url: "https://example.com/v1",
+      model: "m",
+      key: "secret-" + name,
+    });
+  // 文件在最后被截断：前面两个节点对象是完整的
+  fs.writeFileSync(
+    path.join(folder, "config.json"),
+    `{"schema":3,"presets":[{"id":"p","name":"默认预设","config":{"nodes":[${node("a")},${node("b")}]}}],"acti`,
+  );
+  const output = run(dir, ["--bundle", bundle(dir)]);
+  expect(output).toContain("已从残留内容里恢复 2 个节点");
+  const saved = JSON.parse(fs.readFileSync(path.join(folder, "config.json"), "utf8"));
+  expect(saved.nodes.map((n) => n.name)).toEqual(["a", "b"]);
+  expect(saved.nodes[0].key).toBe("secret-a");
+
+  // 已经重启过、面板空了：从备份里还原
+  const broken = path.join(folder, "config.json.broken-2026-01-01T00-00-00-000Z");
+  fs.writeFileSync(
+    broken,
+    `{"nodes":[${node("c")},{"id":"broken","name":"x","url":`,
+  );
+  fs.writeFileSync(path.join(folder, "config.json"), JSON.stringify({ schema: 3, nodes: [] }));
+  const restored = execFileSync(process.execPath, [script, "--restore", broken], {
+    encoding: "utf8",
+  });
+  expect(restored).toContain("找到 1 个节点");
+  const after = JSON.parse(fs.readFileSync(path.join(folder, "config.json"), "utf8"));
+  expect(after.nodes.map((n) => n.name)).toEqual(["c"]);
+});
+
 test("backs up an unrepairable config and refuses to touch a non-tavern directory", () => {
   const dir = tavern();
   const folder = path.join(dir, "data/default-user/silent-failover");

@@ -5,11 +5,13 @@
  * 用法（在酒馆所在的终端里执行，手机 Termux 同样可用）：
  *   node repair.mjs                     自动查找酒馆目录
  *   node repair.mjs --target ~/SillyTavern
+ *   node repair.mjs --restore <config.json.broken-xxx>
+ *                                       只从备份里把节点/Key 还原回当前配置
  *
  * 它会做三件事：
  *   1. 找到酒馆目录，确认版本够新；
  *   2. 从 GitHub 拉最新的「API还没挂」前后端文件，覆盖安装（旧文件先备份）；
- *   3. 检查插件的数据文件，坏的备份、能从临时文件救回来的自动救回来。
+ *   3. 检查插件的数据文件，坏的备份、能从临时文件或残留内容里救回来的自动救回来。
  *
  * 不联网时不改动任何文件；任何一步失败都会明确告诉你卡在哪。
  */
@@ -182,13 +184,76 @@ function newestTemporary(file) {
   return newest;
 }
 
-// 数据文件坏了就地处理：能救的从临时文件救回来，救不了的改名备份，
+// 整份 JSON 解析不了时，里面往往还留着完整的节点对象（截断多半发生在末尾）。
+// 按括号配对把 "nodes":[...] 里的对象一个个抠出来单独解析，用户的 Key 全在这里面。
+function scanNodes(text) {
+  const nodes = [];
+  const seen = new Set();
+  let from = 0;
+  while (nodes.length < 100) {
+    const at = text.indexOf('"nodes"', from);
+    if (at < 0) break;
+    const open = text.indexOf("[", at + 7);
+    if (open < 0) break;
+    from = open + 1;
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+    for (let i = open + 1; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "{") {
+        if (depth === 0) start = i;
+        depth++;
+        continue;
+      }
+      if (ch === "}") {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          let node = null;
+          try {
+            node = JSON.parse(text.slice(start, i + 1));
+          } catch {}
+          const id = node && (node.id || node.url);
+          if (
+            node &&
+            typeof node.url === "string" &&
+            typeof node.name === "string" &&
+            id &&
+            !seen.has(id)
+          ) {
+            seen.add(id);
+            nodes.push(node);
+          }
+          start = -1;
+        }
+        if (depth < 0) break;
+        continue;
+      }
+      if (ch === "]" && depth === 0) break;
+    }
+  }
+  return nodes;
+}
+
+// 数据文件坏了就地处理：能救的从临时文件或残留内容里救回来，救不了的改名备份，
 // 让插件下次启动时按默认配置重建——这样节点和 Key 始终有据可查。
 function repairDataFile(file) {
   if (!fs.existsSync(file)) return { state: "missing" };
+  const text = fs.readFileSync(file, "utf8");
   let problem = "";
   try {
-    return { state: "ok", nodes: countNodes(JSON.parse(fs.readFileSync(file, "utf8"))) };
+    return { state: "ok", nodes: countNodes(JSON.parse(text)) };
   } catch (e) {
     problem = e.message;
   }
@@ -206,13 +271,72 @@ function repairDataFile(file) {
     } catch {}
   }
   const backup = `${file}.broken-${stamp()}`;
+  let moved = true;
   try {
     fs.renameSync(file, backup);
-    return { state: "reset", problem, backup: path.basename(backup) };
-  } catch (e) {
-    return { state: "stuck", problem, error: e.message };
+  } catch {
+    moved = false;
   }
+  const nodes = scanNodes(text);
+  if (nodes.length) {
+    writeAtomic(file, JSON.stringify({ schema: 3, nodes }));
+    return {
+      state: "recovered",
+      nodes: nodes.length,
+      backup: moved ? path.basename(backup) : "",
+    };
+  }
+  if (moved) return { state: "reset", problem, backup: path.basename(backup) };
+  return { state: "stuck", problem, error: "无法备份" };
 }
+
+// --restore：已经重启过、面板变空了，从备份文件里把节点捡回当前配置。
+function restoreFrom(file) {
+  if (!fs.existsSync(file)) die(`找不到文件：${file}`);
+  const nodes = scanNodes(fs.readFileSync(file, "utf8"));
+  if (!nodes.length)
+    die(
+      "这个文件里没找到完整的节点，可能是截断得太厉害。\n把它发给作者，可以人工从残留内容里捞。",
+    );
+  const target = /\.broken-/.test(file)
+    ? file.replace(/\.broken-.*$/, "")
+    : path.join(path.dirname(file), "config.json");
+  let current = {};
+  if (fs.existsSync(target)) {
+    try {
+      current = JSON.parse(fs.readFileSync(target, "utf8"));
+    } catch {
+      current = {};
+    }
+  }
+  const seen = new Set();
+  const existing = [];
+  const collect = (list) => {
+    for (const node of Array.isArray(list) ? list : []) {
+      const id = node?.id || node?.url;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      existing.push(node);
+    }
+  };
+  collect(current.nodes);
+  for (const preset of Array.isArray(current.presets) ? current.presets : [])
+    collect(preset?.config?.nodes);
+  const before = existing.length;
+  for (const node of nodes) {
+    const id = node.id || node.url;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    existing.push(node);
+  }
+  current.nodes = existing;
+  writeAtomic(target, JSON.stringify(current));
+  ok(`从 ${path.basename(file)} 找到 ${nodes.length} 个节点`);
+  ok(`已写入 ${path.relative(process.cwd(), target) || target}（原有 ${before} 个，现共 ${existing.length} 个）`);
+  say("\n下一步：重启酒馆，面板里应该能看到这些节点了。");
+  if (before) warn("原有节点不会被覆盖，只补充备份里多出来的那些。");
+}
+
 
 function dataRoots(root) {
   const roots = new Set();
@@ -261,6 +385,13 @@ function ensureServerPlugins(root) {
 async function main() {
   const major = Number(process.versions.node.split(".")[0]);
   if (major < 18) die(`Node 版本太旧（${process.versions.node}），请先升级到 20 或更新版本。`);
+
+  const restore = arg("--restore");
+  if (restore) {
+    step("从备份还原节点");
+    restoreFrom(path.resolve(restore));
+    return;
+  }
 
   step("查找酒馆目录");
   const root = pickTavern();
@@ -311,6 +442,7 @@ async function main() {
 
   step("检查插件数据");
   let touched = false;
+  let reset = "";
   const roots = dataRoots(root);
   if (!roots.length) warn("没找到 data 目录，跳过（首次安装时属于正常）");
   for (const dir of roots) {
@@ -324,11 +456,18 @@ async function main() {
       if (result.state === "ok") ok(`${label}：正常，${result.nodes} 个节点`);
       else if (result.state === "salvaged")
         ok(`${label}：损坏，已从临时文件恢复，${result.nodes} 个节点`);
-      else if (result.state === "reset")
+      else if (result.state === "recovered")
+        ok(
+          `${label}：损坏，已从残留内容里恢复 ${result.nodes} 个节点` +
+            (result.backup ? `（原文件备份为 ${result.backup}）` : ""),
+        );
+      else if (result.state === "reset") {
+        reset = path.join(path.dirname(file), result.backup);
         warn(
           `${label}：损坏，已备份为 ${result.backup}，重启后按默认设置重建\n` +
-            "     原来的节点和 Key 都在这份备份里，重启后面板如果是空的，把它发给我就能捞回来",
+            "     备份里没有完整的节点对象；如果确实丢过节点，把这份备份发给我，可以人工捞",
         );
+      }
       else if (result.state === "stuck")
         warn(`${label}：损坏且无法备份（${result.error}），请检查文件权限`);
     }
@@ -338,6 +477,11 @@ async function main() {
   say("\n完成。");
   say("  版本：" + bundle.version);
   if (fs.existsSync(backup)) say("  备份：" + backup);
+  if (reset)
+    say(
+      "\n  备份里没有完整的节点，面板可能是空的。等以后拿到节点备份时，用这条命令还原：\n" +
+        "    node repair.mjs --restore " + reset,
+    );
   say("\n下一步：重启酒馆");
   say("  1. 在运行酒馆的那个窗口按 Ctrl+C 停掉；");
   say("  2. 重新执行你平时启动酒馆的命令（常见：./start.sh 或 node server.js）；");

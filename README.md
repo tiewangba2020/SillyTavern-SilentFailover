@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.4.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.5.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -92,12 +92,18 @@ https://github.com/tiewangba2020/SillyTavern-SilentFailover
 curl -fsSL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest/download/repair.mjs -o repair.mjs && node repair.mjs
 ```
 
-它会自动找到酒馆目录、下载最新版前后端、把旧文件备份到 `backups/silent-failover-repair-<时间戳>/`，再检查插件的数据文件：能救的从临时文件救回来，救不了的改名备份。跑完按提示重启酒馆即可。
+它会自动找到酒馆目录、下载最新版前后端、把旧文件备份到 `backups/silent-failover-repair-<时间戳>/`，再检查插件的数据文件：能救的从临时文件或残留内容里救回来，救不了的改名备份。跑完按提示重启酒馆即可。
 
 找不到酒馆目录时，自己指定路径：
 
 ```bash
 node repair.mjs --target ~/SillyTavern
+```
+
+已经重启过、面板里空了，但还记得备份文件名时，可以只做还原（从备份里补节点，已有节点不覆盖）：
+
+```bash
+node repair.mjs --restore ~/SillyTavern/data/default-user/silent-failover/config.json.broken-<时间戳>
 ```
 
 这条命令同样适用于**已经卡在「无法读取插件数据」**的情况——那个状态下插件自己的「一键更新」是走不通的（所有接口都在报错），只能用这个脚本或方法一手动装一次。脚本只用 Node 自带功能，不需要 `unzip`，也不需要额外装依赖。
@@ -221,9 +227,9 @@ volumes:
 
 ```bash
 docker compose stop sillytavern
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.4/SillyTavern-SilentFailover-v1.5.4.zip -o SillyTavern-SilentFailover-v1.5.4.zip
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.4/SHA256SUMS-1.5.4 -o SHA256SUMS-1.5.4
-sha256sum --check --ignore-missing SHA256SUMS-1.5.4 && unzip SillyTavern-SilentFailover-v1.5.4.zip -d api-still-up-package
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.5/SillyTavern-SilentFailover-v1.5.5.zip -o SillyTavern-SilentFailover-v1.5.5.zip
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.5/SHA256SUMS-1.5.5 -o SHA256SUMS-1.5.5
+sha256sum --check --ignore-missing SHA256SUMS-1.5.5 && unzip SillyTavern-SilentFailover-v1.5.5.zip -d api-still-up-package
 docker compose run --rm --no-deps --entrypoint node -v "$PWD/api-still-up-package:/tmp/api-still-up-package:ro" sillytavern /tmp/api-still-up-package/install.mjs --target /home/node/app --config /home/node/app/config/config.yaml
 docker compose up -d sillytavern
 ```
@@ -427,6 +433,12 @@ curl -fsSL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/
 不想用脚本就下载完整安装包手动装一次，装完重启酒馆后台，插件会按默认设置重建配置；节点和 Key 都在备份文件的 `nodes` 里，需要的话可以拷回去。
 
 1.5.4 起插件会自己兜住这类故障：配置解析不了时，把原文件改名成 `config.json.broken-<时间戳>` 留着，按默认设置继续启动，并在面板上写明「已备份、已重置」；如果进程是在写配置写到一半时被杀掉的，那份写了一半的 `config.json.<随机>.tmp` 往往反而是完整的，插件会优先用它把节点、Key 和预设原样恢复；预设指针丢了会回落到第一个可用预设，而不是让整个面板不可用；真的写不进磁盘（权限、只读挂载、空间满）时，报错会带上具体原因，反馈时把它一起发出来即可。
+
+1.5.5 起更进一步：**节点会自动捞回来**。文件末尾被截断时，前面的节点对象其实还是完整的，插件会把它们逐个解析出来恢复进默认配置，面板上会写明「已从当前文件恢复了 N 个节点」；当前文件捞不到时，还会翻最近的 `config.json.broken-*` 再试一次。如果已经重启过、面板是空的，也可以手动指定备份还原（只补节点，不覆盖现有）：
+
+```bash
+node repair.mjs --restore data/default-user/silent-failover/config.json.broken-<时间戳>
+```
 
 ### 生成等很久之后报错，回复也丢了？
 
