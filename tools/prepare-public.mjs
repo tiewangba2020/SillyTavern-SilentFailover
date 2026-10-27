@@ -18,6 +18,7 @@ const copy = (source, target) => {
 for (const name of [
   "extension", "server", "tests", "tools", "package.json", "package-lock.json",
   "README.md", "LICENSE", ".gitignore", "playwright.config.js", "vitest.config.js",
+  "repair.mjs",
   "docs/DEVELOPMENT.md",
 ]) copy(path.join(root, name), path.join(destination, name));
 const obsoleteReport = path.join(destination, "docs/PUBLIC-VERIFICATION.md");
