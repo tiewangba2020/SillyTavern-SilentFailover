@@ -325,7 +325,10 @@ async function main() {
       else if (result.state === "salvaged")
         ok(`${label}：损坏，已从临时文件恢复，${result.nodes} 个节点`);
       else if (result.state === "reset")
-        warn(`${label}：损坏，已备份为 ${result.backup}，重启后按默认设置重建`);
+        warn(
+          `${label}：损坏，已备份为 ${result.backup}，重启后按默认设置重建\n` +
+            "     原来的节点和 Key 都在这份备份里，重启后面板如果是空的，把它发给我就能捞回来",
+        );
       else if (result.state === "stuck")
         warn(`${label}：损坏且无法备份（${result.error}），请检查文件权限`);
     }
