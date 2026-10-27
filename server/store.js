@@ -34,28 +34,129 @@ export function atomicJson(file, value) {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
   }
 }
+// 读不动文件（权限、磁盘满）是真问题，交给上层报错；
+// 内容坏了（手机被强杀、存储写一半、手工改过）只影响这一份数据，
+// 备份原文件后按默认配置继续跑，否则用户会一直卡在「无法读取插件数据」。
+const parseConfig = (file) => {
+  const value = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("内容不是对象");
+  return value;
+};
+// atomicJson 先写 <config>.json.<uuid>.tmp 再改名；进程被强杀时临时文件是完整的，
+// 比坏掉的主文件可靠，优先用它把用户的节点和 Key 捞回来。
+function salvageTemporary(file) {
+  let newest = null;
+  let newestAt = 0;
+  try {
+    for (const name of fs.readdirSync(path.dirname(file))) {
+      if (!name.startsWith(path.basename(file) + ".") || !name.endsWith(".tmp"))
+        continue;
+      const full = path.join(path.dirname(file), name);
+      const at = fs.statSync(full).mtimeMs;
+      if (at > newestAt) {
+        newestAt = at;
+        newest = full;
+      }
+    }
+  } catch {
+    return null;
+  }
+  if (!newest) return null;
+  try {
+    return { stored: parseConfig(newest), name: path.basename(newest) };
+  } catch {
+    return null;
+  }
+}
+function readConfig(file) {
+  if (!fs.existsSync(file)) {
+    const salvaged = salvageTemporary(file);
+    return salvaged
+      ? {
+          stored: salvaged.stored,
+          warning: `已从上次写入中断留下的临时文件（${salvaged.name}）恢复设置`,
+        }
+      : { stored: {}, warning: "" };
+  }
+  let problem = "";
+  try {
+    return { stored: parseConfig(file), warning: "" };
+  } catch (e) {
+    problem = e.message;
+  }
+  const backup = `${file}.broken-${Date.now()}`;
+  let moved = true;
+  try {
+    fs.renameSync(file, backup);
+  } catch {
+    moved = false;
+  }
+  const salvaged = salvageTemporary(file);
+  if (salvaged)
+    return {
+      stored: salvaged.stored,
+      warning: `配置文件无法解析（${problem}），已${moved ? `备份为 ${path.basename(backup)}` : "跳过备份"}，并从临时文件（${salvaged.name}）恢复了设置`,
+    };
+  return {
+    stored: {},
+    warning: `配置文件无法解析（${problem}），${moved ? `已备份为 ${path.basename(backup)}` : "且无法备份"}，按默认设置启动`,
+  };
+}
 export class Store {
   constructor(root) {
     this.root = path.join(root, "silent-failover");
     this.file = path.join(this.root, "config.json");
     this.listeners = new Set();
-    this.config = fs.existsSync(this.file)
-      ? {
-          ...structuredClone(DEFAULTS),
-          ...JSON.parse(fs.readFileSync(this.file, "utf8")),
-        }
-      : structuredClone(DEFAULTS);
-    const stored = this.config;
+    const { stored, warning } = readConfig(this.file);
+    this.warning = warning;
+    // 旧版是扁平配置，新版把每个预设的配置嵌在 presets 里，两边都补齐默认值。
+    const flat = { ...structuredClone(DEFAULTS), ...stored };
     this.revision = Number.isSafeInteger(stored.revision) ? stored.revision : 0;
-    this.presets = stored.presets || [
-      { id: randomUUID(), name: "默认预设", config: this.cleanConfig(stored) },
-    ];
-    this.activePresetId = stored.activePresetId || this.presets[0].id;
-    this.config = this.presets.find(
-      (p) => p.id === this.activePresetId,
-    )?.config;
-    if (!this.config) throw new Error("当前预设不存在");
-    if (!stored.presets) this.persistConfig();
+    const presets = Array.isArray(stored.presets)
+      ? stored.presets
+          .filter(
+            (p) =>
+              p &&
+              typeof p.id === "string" &&
+              p.config &&
+              typeof p.config === "object" &&
+              !Array.isArray(p.config),
+          )
+          .map((p) => ({
+            id: p.id,
+            name: p.name,
+            config: { ...structuredClone(DEFAULTS), ...p.config },
+          }))
+      : [];
+    this.presets = presets.length
+      ? presets
+      : [
+          {
+            id: randomUUID(),
+            name: "默认预设",
+            config: this.cleanConfig(flat),
+          },
+        ];
+    this.activePresetId =
+      this.presets.find((p) => p.id === stored.activePresetId)?.id ||
+      this.presets[0].id;
+    this.config = this.presets.find((p) => p.id === this.activePresetId).config;
+    // 旧版没有预设列表、预设全部失效、指针指丢时把修好的结构写回去。
+    if (
+      !presets.length ||
+      this.activePresetId !== stored.activePresetId ||
+      !Array.isArray(stored.presets)
+    )
+      this.persistQuietly();
+  }
+  // 构造阶段不能因为写不进去就整体不可用：设置项保存时会再报一次真正的错误。
+  persistQuietly() {
+    try {
+      this.persistConfig();
+    } catch (e) {
+      this.warning = `${this.warning ? this.warning + "；" : ""}配置无法写入磁盘（${e.message}），本次修改可能不会被保存`;
+    }
   }
   cleanConfig(config) {
     return Object.fromEntries(
@@ -90,6 +191,7 @@ export class Store {
       presetName: this.presetName(),
       presets: this.presets.map(({ id, name }) => ({ id, name })),
       revision: this.revision,
+      warning: this.warning || "",
       nodes: this.config.nodes.map(({ key, maxTokens, ...n }) => ({
         ...n,
         keySet: Boolean(key),

@@ -423,7 +423,7 @@ data: [DONE]
 }
 
 // server/version.js
-var VERSION = "1.5.3";
+var VERSION = "1.5.4";
 
 // extension/panel.js
 var make = (tag, cls, text) => {
@@ -1830,7 +1830,11 @@ async function updatePlugin() {
   const b = root.querySelector("[data-update]");
   b.disabled = true;
   try {
-    if (!config?.updateSupported)
+    if (!config)
+      throw new Error(
+        "\u63D2\u4EF6\u914D\u7F6E\u5C1A\u672A\u8BFB\u53D6\u6210\u529F\uFF0C\u65E0\u6CD5\u4E00\u952E\u66F4\u65B0\u3002\u8BF7\u5148\u5237\u65B0\u914D\u7F6E\uFF1B\u4ECD\u5931\u8D25\u65F6\u6309 README \u68C0\u67E5\u6570\u636E\u76EE\u5F55\uFF0C\u6216\u624B\u52A8\u5B89\u88C5\u5B8C\u6574\u5B89\u88C5\u5305"
+      );
+    if (!config.updateSupported)
       throw new Error(
         "\u5F53\u524D\u670D\u52A1\u7AEF\u5C1A\u4E0D\u652F\u6301\u4E00\u952E\u66F4\u65B0\uFF0C\u8BF7\u5148\u624B\u52A8\u5B89\u88C5 1.2.0 \u6216\u66F4\u65B0\u7248\u672C\u5E76\u91CD\u542F\u9152\u9986"
       );
@@ -2086,7 +2090,7 @@ async function boot() {
     savedConfig = structuredClone(config);
     render();
     message(
-      `\u524D\u7AEF ${VERSION} \xB7 \u670D\u52A1\u7AEF ${config.version || "\u672A\u77E5"}${config.version !== VERSION ? " \xB7 \u8BF7\u540C\u6B65\u5347\u7EA7\u4E24\u90E8\u5206" : " \xB7 \u5DF2\u8FDE\u63A5"}`
+      config.warning || `\u524D\u7AEF ${VERSION} \xB7 \u670D\u52A1\u7AEF ${config.version || "\u672A\u77E5"}${config.version !== VERSION ? " \xB7 \u8BF7\u540C\u6B65\u5347\u7EA7\u4E24\u90E8\u5206" : " \xB7 \u5DF2\u8FDE\u63A5"}`
     );
     panel.update(config, await bridge.api("/records"));
     root.querySelector("[data-update]").disabled = config.canUpdate === false;

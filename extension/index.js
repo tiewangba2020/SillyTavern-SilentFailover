@@ -1100,7 +1100,11 @@ async function updatePlugin() {
   const b = root.querySelector("[data-update]");
   b.disabled = true;
   try {
-    if (!config?.updateSupported)
+    if (!config)
+      throw new Error(
+        "插件配置尚未读取成功，无法一键更新。请先刷新配置；仍失败时按 README 检查数据目录，或手动安装完整安装包",
+      );
+    if (!config.updateSupported)
       throw new Error(
         "当前服务端尚不支持一键更新，请先手动安装 1.2.0 或更新版本并重启酒馆",
       );
@@ -1376,7 +1380,8 @@ async function boot() {
     savedConfig = structuredClone(config);
     render();
     message(
-      `前端 ${VERSION} · 服务端 ${config.version || "未知"}${config.version !== VERSION ? " · 请同步升级两部分" : " · 已连接"}`,
+      config.warning ||
+        `前端 ${VERSION} · 服务端 ${config.version || "未知"}${config.version !== VERSION ? " · 请同步升级两部分" : " · 已连接"}`,
     );
     panel.update(config, await bridge.api("/records"));
     root.querySelector("[data-update]").disabled = config.canUpdate === false;

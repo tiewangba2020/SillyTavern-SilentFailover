@@ -42,8 +42,13 @@ export async function init(router, options = {}) {
       }
       req.failover = users.get(root);
       next();
-    } catch {
-      res.status(500).json({ error: "无法读取插件数据" });
+    } catch (e) {
+      // 以前这里静默吞掉，用户只看到「无法读取插件数据」，
+      // 后台也没有任何线索，线上反馈根本没法定位。
+      console.error("[silent-failover] 插件数据初始化失败：", e);
+      res.status(500).json({
+        error: `无法读取插件数据：${e?.message || e}`,
+      });
     }
   });
   const route = (fn) => (req, res) => {

@@ -53,6 +53,57 @@ test("migrates old settings, isolates copies and keeps all keys out of public pr
     "test-only-changed",
   );
 });
+test("corrupted or orphaned config no longer bricks the plugin", () => {
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "sf-broken-"));
+  cleanup.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "silent-failover", "config.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+
+  // 手机被强杀、存储写一半：JSON 解析不了
+  fs.writeFileSync(file, '{"nodes": [{"name": "x"');
+  const broken = new Store(dir);
+  expect(broken.warning).toContain("无法解析");
+  expect(broken.config.nodes).toEqual([]);
+  const backups = fs
+    .readdirSync(path.dirname(file))
+    .filter((n) => n.startsWith("config.json.broken-"));
+  expect(backups).toHaveLength(1);
+  expect(fs.readFileSync(file, "utf8")).toContain('"schema"');
+
+  // 预设指针指向已不存在的预设、预设条目本身残缺
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      ...DEFAULTS,
+      activePresetId: "gone",
+      nodes: [node],
+      presets: [{ id: "kept", name: "A" }, { id: "kept2", name: "B", config: null }],
+    }),
+  );
+  const orphan = new Store(dir);
+  expect(orphan.presets).toHaveLength(1);
+  expect(orphan.activePresetId).toBe(orphan.presets[0].id);
+  expect(orphan.config.nodes).toEqual([node]);
+  expect(JSON.parse(fs.readFileSync(file, "utf8")).activePresetId).toBe(
+    orphan.activePresetId,
+  );
+
+  // 冷重启把主文件写坏了，但 atomicJson 留下的临时文件是完整的：优先从它恢复。
+  fs.writeFileSync(file, '{"nodes": [{"na');
+  const temporary = path.join(
+    path.dirname(file),
+    "config.json.0f9c1a2b-1111-2222-3333-444455556666.tmp",
+  );
+  fs.writeFileSync(
+    temporary,
+    JSON.stringify({ ...DEFAULTS, enabled: true, nodes: [node] }),
+  );
+  const salvaged = new Store(dir);
+  expect(salvaged.warning).toContain("临时文件");
+  expect(salvaged.config.enabled).toBe(true);
+  expect(salvaged.config.nodes).toEqual([node]);
+  expect(salvaged.keys()).toContain(node.key);
+});
 test("rejects stale saves and duplicate names without overwriting saved data", () => {
   const { store, dir } = fixture();
   const old = store.publicConfig();

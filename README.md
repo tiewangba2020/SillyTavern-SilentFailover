@@ -37,7 +37,7 @@
 
 ### 方法一：完整安装包安装（推荐）
 
-1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.3.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
+1. 打开[下载页面](https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/latest)，下载 `SillyTavern-SilentFailover-v1.5.4.zip` 并解压。不要选 GitHub 自动生成的 `Source code` 压缩包。
 2. 关闭正在运行的酒馆。在解压目录打开终端，运行下面的命令，将路径改成你自己的酒馆目录：
 
 ```powershell
@@ -203,9 +203,9 @@ volumes:
 
 ```bash
 docker compose stop sillytavern
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.3/SillyTavern-SilentFailover-v1.5.3.zip -o SillyTavern-SilentFailover-v1.5.3.zip
-curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.3/SHA256SUMS-1.5.3 -o SHA256SUMS-1.5.3
-sha256sum --check --ignore-missing SHA256SUMS-1.5.3 && unzip SillyTavern-SilentFailover-v1.5.3.zip -d api-still-up-package
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.4/SillyTavern-SilentFailover-v1.5.4.zip -o SillyTavern-SilentFailover-v1.5.4.zip
+curl -fL https://github.com/tiewangba2020/SillyTavern-SilentFailover/releases/download/v1.5.4/SHA256SUMS-1.5.4 -o SHA256SUMS-1.5.4
+sha256sum --check --ignore-missing SHA256SUMS-1.5.4 && unzip SillyTavern-SilentFailover-v1.5.4.zip -d api-still-up-package
 docker compose run --rm --no-deps --entrypoint node -v "$PWD/api-still-up-package:/tmp/api-still-up-package:ro" sillytavern /tmp/api-still-up-package/install.mjs --target /home/node/app --config /home/node/app/config/config.yaml
 docker compose up -d sillytavern
 ```
@@ -395,6 +395,14 @@ Google 是按型号逐个收紧的，不是按大版本一刀切，所以插件�
 先确认电脑与手机打开的是同一台电脑、同一端口的酒馆，并查看插件面板的完整报错。`404` 通常表示该实例没有加载插件服务端；`401` 表示登录失效；`403` 可能涉及权限或 CSRF 校验，先刷新重新登录，并检查电脑后台日志。酒馆页面能打开，不等于插件服务端已正确安装加载。
 
 普通 `http://局域网IP:端口` 与电脑上的 `localhost` 属于不同的浏览器安全环境。若出现 `crypto.randomUUID is not a function` 或 `AbortSignal.any/timeout is not a function`，属于浏览器接口兼容问题，不是 Key 失效。反馈时附上插件前后端版本、手机浏览器名称及完整错误文字，不要公开 Key。
+
+### 面板只显示「无法读取插件数据」？
+
+这句话表示插件后台在读取**当前账号的配置目录**时抛错了，跟网络、跟手机还是电脑访问都无关。最常见的原因是 `data/<用户名>/silent-failover/config.json` 写坏了——手机被系统强杀、存储写了一半、或者手工改过；其次是配置里的预设指针失效（指向了已经不存在的预设）。面板拿不到配置，就只会剩下这一行字，节点和设置全都不会渲染。
+
+处理办法：这种情况**一键更新是走不通的**——数据初始化失败会让所有接口都返回 500，更新接口也在里面，所以必须手动装一次完整安装包。装完重启酒馆后台，插件会按默认设置重建配置；节点和 Key 都在备份文件的 `nodes` 里，需要的话可以拷回去。
+
+1.5.4 起插件会自己兜住这类故障：配置解析不了时，把原文件改名成 `config.json.broken-<时间戳>` 留着，按默认设置继续启动，并在面板上写明「已备份、已重置」；如果进程是在写配置写到一半时被杀掉的，那份写了一半的 `config.json.<随机>.tmp` 往往反而是完整的，插件会优先用它把节点、Key 和预设原样恢复；预设指针丢了会回落到第一个可用预设，而不是让整个面板不可用；真的写不进磁盘（权限、只读挂载、空间满）时，报错会带上具体原因，反馈时把它一起发出来即可。
 
 ### 生成等很久之后报错，回复也丢了？
 
